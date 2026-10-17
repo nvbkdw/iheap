@@ -40,6 +40,7 @@ jobs:
           pip install maturin pytest pqdict
           maturin develop --release
           pytest -q
+          IHEAP_PURE_PYTHON=1 pytest -q   # the pure-Python fallback core
 
   wheels:
     needs: test
@@ -144,6 +145,48 @@ jobs:
           name: wheels-ft-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux || 'native' }}
           path: dist
 
+  # Pure-Python fallback for interpreters no native wheel fits (CPython 3.13t,
+  # PyPy, ...): the platform wheel minus the extension, retagged py3-none-any.
+  wheel-pure:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: |
+          pip install maturin
+          maturin build --release --out native
+          python scripts/make_pure_wheel.py native/*.whl dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-pure
+          path: dist
+
+  test-pure-wheel:
+    needs: wheel-pure
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13t"
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-pure
+          path: dist
+      - name: Install the pure wheel and test it
+        shell: bash
+        run: |
+          python -m pip install dist/*.whl pytest pqdict
+          python -c "import iheap, sys; assert not iheap.NATIVE; assert not sys._is_gil_enabled()"
+          python -m pytest -q tests
+
   sdist:
     runs-on: ubuntu-latest
     steps:
@@ -161,7 +204,7 @@ jobs:
     # PyPI Trusted Publishing: configure the "iheap" project on pypi.org to
     # trust this repository, workflow "ci.yml" and environment "pypi".
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [wheels, wheels-freethreaded, sdist]
+    needs: [wheels, wheels-freethreaded, test-pure-wheel, sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

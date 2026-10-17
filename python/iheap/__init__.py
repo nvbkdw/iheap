@@ -1,15 +1,24 @@
 """Indexed priority queues with a Rust core.
 
-* :class:`IndexedHeap` -- low-level native heap of float priorities addressed by
+* :class:`IndexedHeap` -- low-level heap of float priorities addressed by
   integer handles. Holds no Python objects.
 * :class:`PQDict` -- ``pqdict``-style mapping of keys to values ordered by
-  priority. Keys and values live in Python; only priorities reach Rust.
+  priority. Keys and values live in Python; only priorities reach the core.
+
+:data:`NATIVE` tells whether the Rust core is in use. Where no prebuilt wheel
+exists for the interpreter (for example free-threaded CPython 3.13), a
+pure-Python core with the same API is used instead.
 """
 
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _version
 
-from ._iheap import IndexedHeap
+from ._core import NATIVE, IndexedHeap
 from ._pqdict import PQDict, maxpq, minpq, nlargest, nsmallest
 
-__all__ = ["IndexedHeap", "PQDict", "maxpq", "minpq", "nlargest", "nsmallest"]
-__version__ = _version("iheap")
+__all__ = ["NATIVE", "IndexedHeap", "PQDict", "maxpq", "minpq", "nlargest", "nsmallest"]
+
+try:
+    __version__ = _version("iheap")
+except PackageNotFoundError:  # running from a source checkout
+    __version__ = "0+unknown"

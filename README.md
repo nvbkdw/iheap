@@ -22,11 +22,18 @@ pip install iheap
 📖 **Documentation:** <https://nvbkdw.github.io/iheap/>. It covers a
 getting-started guide, the API reference, the benchmark and development notes.
 
-Prebuilt wheels cover CPython ≥ 3.10 on Linux (glibc and musl, x86_64 and
-aarch64), macOS (x86_64 and arm64) and Windows (x64). That includes the
-free-threaded (no-GIL) build of 3.14. `IndexedHeap` is safe to
-share between threads; guard a `PQDict` that several threads mutate with a
-lock.
+pip picks the best implementation for your interpreter automatically:
+
+| Interpreter | Core |
+|---|---|
+| CPython ≥ 3.10 with the GIL | native Rust (`abi3` wheel), lock-free: the GIL is the lock |
+| CPython 3.14t, free-threaded | native Rust (`cp314t` wheel), mutex per heap |
+| CPython 3.13t, PyPy, other platforms | pure Python (`py3-none-any` wheel), same API |
+
+Native wheels cover Linux (glibc and musl, x86_64 and aarch64), macOS
+(x86_64 and arm64) and Windows (x64). `iheap.NATIVE` tells you which core
+you got. `IndexedHeap` is safe to share between threads; guard a `PQDict`
+that several threads mutate with a lock.
 
 ## Design
 

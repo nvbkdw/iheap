@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, MutableMapping
 from typing import Any, Generic, TypeVar
 
-from ._iheap import IndexedHeap
+from ._core import IndexedHeap
 
 K = TypeVar("K", bound=Hashable)
 V = TypeVar("V")

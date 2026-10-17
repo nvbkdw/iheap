@@ -46,8 +46,11 @@ crates/iheap-core/     pure-Rust core: no PyO3
   examples/bench.rs    core-only micro-benchmark
 crates/iheap-py/       thin PyO3 binding -> iheap._iheap (abi3-py310; free-threading safe)
 python/iheap/          Python package
+  _core.py             picks the core: native extension, else pure Python
+  _pyheap.py           pure-Python IndexedHeap (fallback, same API)
   _pqdict.py           PQDict mapping API
   _iheap.pyi           type stub + docs for the native module
+scripts/make_pure_wheel.py   derives the py3-none-any fallback wheel
 tests/                 pytest suite (incl. differential tests vs dict and pqdict)
 benchmarks/bench.py    end-to-end benchmark
 docs/ + mkdocs.yml     this documentation
@@ -75,6 +78,7 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test -p iheap-core          # Rust: unit tests + randomized model test
 pytest                            # Python: tests/, doctests, docs code blocks
+IHEAP_PURE_PYTHON=1 pytest        # the same suite against the pure-Python core
 ```
 
 The pytest suite includes:
@@ -104,9 +108,15 @@ that stub in sync with `crates/iheap-py/src/lib.rs`.
    the Python package version is derived from it.
 2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 3. CI tests on Linux, macOS and Windows (CPython 3.10, 3.14 and free-threaded
-   3.14t). It builds `abi3` wheels for 7 platform targets, free-threaded
-   `cp314t` wheels for the same targets (abi3 cannot load on
-   free-threaded CPython) and an sdist, then publishes them to PyPI through
+   3.14t), each against both the native and the pure-Python core. It builds:
+   - `abi3` wheels for 7 platform targets (GIL-specialized core);
+   - free-threaded `cp314t` wheels for the same targets (mutex core; `abi3`
+     cannot load on free-threaded CPython);
+   - the pure-Python `py3-none-any` wheel, which is then installed and tested
+     on CPython 3.13t;
+   - an sdist.
+
+   Everything is published to PyPI through
    [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (no API
    token is stored).
 

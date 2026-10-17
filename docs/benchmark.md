@@ -73,6 +73,14 @@ operation, speed-up in parentheses):
 From n = 100k up, the geometric mean over the five operations is a **2.1×**
 speed-up; at n = 10k, where everything fits in cache, it is 1.5×.
 
+### Pure-Python fallback core
+
+Where no native wheel fits (for example CPython 3.13t), the pure-Python core
+is used. With `IHEAP_PURE_PYTHON=1` on the same machine, it runs at
+pure-Python speed: roughly on par with `pqdict` (0.8–1.5×) and about 10×
+slower than the native core. It exists so the library works everywhere, not
+for speed.
+
 ## Where the time goes
 
 **In Python:** compared with the end-to-end numbers above, the native core

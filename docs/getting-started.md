@@ -6,10 +6,29 @@
 pip install iheap
 ```
 
-Wheels are published for CPython 3.10+ on Linux (x86_64/aarch64, glibc and
-musl), macOS (x86_64/arm64) and Windows (x64), including the free-threaded
-(no-GIL) build of 3.14. On other platforms pip builds from source,
-which requires a [Rust toolchain](https://rustup.rs).
+pip picks the best implementation for your interpreter automatically:
+
+| Interpreter | Wheel | Core |
+|---|---|---|
+| CPython 3.10+ (regular, with the GIL) | `abi3` wheel | native Rust, GIL-specialized: no locking at all |
+| CPython 3.14t (free-threaded) | `cp314t` wheel | native Rust with a per-heap mutex |
+| CPython 3.13t, PyPy, other platforms | `py3-none-any` wheel | pure Python, same API |
+
+Native wheels cover Linux (x86_64/aarch64, glibc and musl), macOS
+(x86_64/arm64) and Windows (x64). The pure-Python core behaves identically,
+but runs at pure-Python speed, comparable to `pqdict`. That matters for
+free-threaded 3.13, which the native extension can't support (its Rust
+bindings support free-threading from 3.14 on).
+
+Check which core you got with `iheap.NATIVE`, or force the pure-Python one
+by setting the environment variable `IHEAP_PURE_PYTHON=1` (useful for
+debugging):
+
+```python
+import iheap
+
+print(iheap.NATIVE)  # True with a native wheel
+```
 
 ## The basics
 

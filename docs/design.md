@@ -44,7 +44,7 @@ These constraints shaped the design:
  │   _values:  list   handle -> value         │   │   root:    Node                  │
  └────────────────────────────────────────────┘   │   free:    [Handle]              │
           f64 priorities in, u32 handles out ▲    └──────────────────────────────────┘
-                                    crates/iheap-py: PyO3 binding, one Mutex per heap
+                         crates/iheap-py: PyO3 binding (GIL- or mutex-synchronized)
 ```
 
 There are three layers, each testable on its own:
@@ -53,7 +53,9 @@ There are three layers, each testable on its own:
   structure and nothing else, so `cargo test` runs without a Python
   interpreter.
 - **`iheap-py`**: a thin PyO3 binding. It converts types and errors, and
-  guards each heap with a lock for free-threaded Python.
+  synchronizes each heap: through the GIL, or with a mutex on
+  free-threaded Python. A pure-Python core with the same API stands in
+  where no native wheel fits.
 - **`python/iheap`**: the `PQDict` mapping API. It owns all payload storage
   and maps keys to handles.
 
@@ -340,21 +342,52 @@ _values  : list, index = handle   the payload; priority = key(value) or value
   `push_pop` and reuses the popped handle for the new key, while
   `replace_key` and `swap_priority` only re-wire `_handles` and `_keys`.
 
-## Concurrency
+## Implementations and concurrency
 
-The binding wraps each core heap in a `std::sync::Mutex` (a `frozen` PyO3
-class), and the module is declared `gil_used = false`:
+Python may call one object's methods from several threads, so a heap needs a
+synchronization strategy. The cheapest correct one depends on the
+interpreter, so `iheap` ships three implementations of the same
+`IndexedHeap` API and chooses one per interpreter:
 
-- Concurrent calls on one `IndexedHeap` from several threads are
-  **serialized**, as for built-in `list` operations. The alternative,
-  PyO3's per-object borrow flag, would raise `RuntimeError: Already borrowed`
-  instead.
-- The lock is never held while Python code runs, because PyO3 converts all
-  arguments before the method body takes it. So it can't deadlock against
-  the interpreter. On GIL builds it costs nothing measurable.
-- On free-threaded CPython 3.14t, importing `iheap` keeps the GIL
-  disabled. Those interpreters can't load `abi3` wheels, so CI builds
-  dedicated `cp314t` wheels.
+| Interpreter | Wheel | Core | Synchronization | Cost per call |
+|---|---|---|---|---|
+| CPython ≥ 3.10 with GIL | `cp310-abi3` | Rust | the GIL itself | 16–20 ns |
+| CPython 3.14t (no GIL) | `cp314-cp314t` | Rust | `Mutex` per heap | 18–24 ns |
+| CPython 3.13t, PyPy, … | `py3-none-any` | pure Python | `threading.Lock` per heap | ~10× native |
+
+The per-call cost is for the cheapest calls (`peek`, `len`, `priority`)
+from Python, including the cross-language call.
+
+**Native cores, selected at compile time.** The binding
+(`crates/iheap-py/src/shared.rs`) keeps the heap in a `SharedHeap`, which is
+reached only through `with(|heap| …)`. A closure can't leak or nest borrows.
+The free-threading cfg `Py_GIL_DISABLED`, set by `pyo3-build-config` for
+free-threaded interpreters, picks the body:
+
+- **GIL builds:** an `UnsafeCell` with no locking at all. Every call holds
+  the GIL, and a closure only manipulates the Rust heap: it never runs Python
+  code or releases the GIL. So no other thread can enter between the start
+  and end of an operation. The GIL *is* the lock, which makes this about
+  3–4 ns faster per call than a mutex. It is also slightly faster than PyO3's
+  default per-object borrow flag, which would raise
+  `RuntimeError: Already borrowed` under contention anyway.
+- **Free-threaded builds:** a `std::sync::Mutex`. The lock is never held
+  while Python code runs, because PyO3 converts all arguments before the
+  method body takes it, so it can't deadlock against the interpreter. The
+  module is declared `gil_used = false`, so importing `iheap` keeps the GIL
+  disabled.
+
+**Pure-Python fallback, selected at import time.** `iheap._core` imports the
+native extension and falls back to `iheap._pyheap` if it's missing (or if
+`IHEAP_PURE_PYTHON` is set). `_pyheap` is an indexed binary heap with the
+same handle semantics, atomic batches and exception types. A differential
+test drives both cores through the same random operation sequence and
+requires identical results. It exists for interpreters that no native wheel
+fits, chiefly free-threaded CPython 3.13: PyO3 supports free-threading only
+from 3.14, where it is no longer experimental. It ships as a `py3-none-any`
+wheel, derived from a platform wheel by `scripts/make_pure_wheel.py`.
+Installers always prefer a matching native wheel, so it is chosen only where
+nothing native fits.
 - **`PQDict` is not safe for concurrent mutation.** Each of its operations
   takes several steps across a `dict`, two `list`s and the native heap. Guard
   a shared `PQDict` with a lock.
@@ -386,3 +419,8 @@ class), and the module is declared `gil_used = false`:
   `reversed`), a differential test against `pqdict`, doctests, every code
   block in these docs, and an 8-thread stress test that runs on free-threaded
   CPython in CI.
+- **Both cores:** the whole Python suite also runs against the pure-Python
+  core (`IHEAP_PURE_PYTHON=1`). A differential test drives the native and
+  pure cores through the same random operations and requires identical
+  results and exception types. CI installs the `py3-none-any` wheel on
+  CPython 3.13t (Linux, macOS, Windows) and runs the suite there.
