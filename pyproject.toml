@@ -1,0 +1,41 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "iheap"
+description = "Fast indexed priority queue (pqdict-style) with a Rust core"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ryan Huang", email = "ryan.huang@noetik.ai" }]
+requires-python = ">=3.10"
+keywords = ["priority queue", "heap", "indexed heap", "pqdict", "dijkstra"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/nvbkdw/iheap"
+Issues = "https://github.com/nvbkdw/iheap/issues"
+
+[dependency-groups]
+dev = ["maturin>=1.7,<2", "pytest>=8", "pqdict>=1.4"]
+
+[tool.maturin]
+manifest-path = "crates/iheap-py/Cargo.toml"
+python-source = "python"
+module-name = "iheap._iheap"
+features = ["pyo3/extension-module"]
+profile = "release"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

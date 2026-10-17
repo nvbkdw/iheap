@@ -1,0 +1,17 @@
+[package]
+name = "iheap-py"
+description = "Python bindings for iheap-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "_iheap"
+crate-type = ["cdylib"]
+
+[dependencies]
+iheap-core = { path = "../iheap-core" }
+pyo3 = { version = "0.30", features = ["abi3-py310"] }

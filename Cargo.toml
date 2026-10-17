@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/iheap-core", "crates/iheap-py"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/nvbkdw/iheap"
+rust-version = "1.74"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"

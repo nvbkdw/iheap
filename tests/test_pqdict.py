@@ -1,0 +1,179 @@
+import copy
+import math
+import pickle
+import random
+
+import pytest
+
+from iheap import PQDict, maxpq, minpq, nlargest, nsmallest
+
+
+def test_mapping_basics():
+    pq = PQDict({"a": 3, "b": 1, "c": 2})
+    assert len(pq) == 3 and "a" in pq and "z" not in pq
+    assert pq["a"] == 3
+    pq["a"] = 0
+    assert pq.top() == "a"
+    del pq["a"]
+    assert sorted(pq) == ["b", "c"]
+    assert pq == {"b": 1, "c": 2}
+    with pytest.raises(KeyError):
+        pq["a"]
+    with pytest.raises(KeyError):
+        del pq["a"]
+
+
+def test_priority_order_and_reverse():
+    rng = random.Random(1)
+    data = {k: rng.random() for k in range(100)}
+    assert list(PQDict(data).popkeys()) == sorted(data, key=data.get)
+    assert list(maxpq(data).popkeys()) == sorted(data, key=data.get, reverse=True)
+
+
+def test_key_function_keeps_original_values():
+    pq = PQDict({"x": (3, "p"), "y": (1, "q")}, key=lambda v: v[0])
+    assert pq.keyfn is not None
+    assert pq.popitem() == ("y", (1, "q"))
+    assert pq.topvalue() == (3, "p")
+
+
+def test_pop_variants():
+    pq = minpq(a=2, b=1, c=3)
+    assert pq.pop() == "b"
+    assert pq.pop("c") == 3
+    assert pq.pop("zz", None) is None
+    assert pq.popvalue() == 2
+    assert pq.pop(default="empty") == "empty"
+    assert pq.popvalue(default=0) == 0
+    for fn in (pq.pop, pq.popitem, pq.top, pq.topitem, pq.popvalue):
+        with pytest.raises(KeyError):
+            fn()
+    with pytest.raises(KeyError):
+        pq.pop("missing")
+    assert pq.top("d") == "d" and pq.topvalue("d") == "d"
+
+
+def test_add_update_items():
+    pq = PQDict()
+    pq.additem("a", 1)
+    with pytest.raises(KeyError):
+        pq.additem("a", 2)
+    pq.updateitem("a", 5)
+    with pytest.raises(KeyError):
+        pq.updateitem("b", 1)
+    assert pq.topitem() == ("a", 5)
+
+
+def test_pushpopitem():
+    pq = minpq(a=5, b=7)
+    assert pq.pushpopitem("c", 1) == ("c", 1)
+    assert "c" not in pq
+    assert pq.pushpopitem("d", 6) == ("a", 5)
+    assert pq == {"b": 7, "d": 6}
+    with pytest.raises(KeyError):
+        pq.pushpopitem("b", 0)
+    assert PQDict().pushpopitem("x", 1) == ("x", 1)
+
+
+def test_replace_key_and_swap_priority():
+    pq = minpq(a=1, b=2)
+    pq.replace_key("a", "z")
+    assert pq == {"z": 1, "b": 2}
+    with pytest.raises(KeyError):
+        pq.replace_key("z", "b")
+    pq.swap_priority("z", "b")
+    assert pq == {"z": 2, "b": 1}
+    assert pq.top() == "b"
+
+
+def test_heapify_after_in_place_mutation():
+    pq = PQDict({"a": [3], "b": [2], "c": [1]}, key=lambda v: v[0])
+    pq["c"][0] = 10
+    pq.heapify("c")
+    assert pq.top() == "b"
+    pq["a"][0] = -1
+    pq["b"][0] = 20
+    pq.heapify()
+    assert list(pq.popkeys()) == ["a", "c", "b"]
+
+
+def test_invalid_priorities_leave_state_intact():
+    pq = minpq(a=1, b=2)
+    with pytest.raises(ValueError):
+        pq["a"] = math.nan
+    with pytest.raises(ValueError):
+        pq.update({"a": 0, "c": math.nan})
+    with pytest.raises(ValueError):
+        pq.update({"a": math.nan, "c": 0})
+    with pytest.raises(TypeError):
+        pq["c"] = "not a number"
+    assert pq == {"a": 1, "b": 2}
+    assert list(pq.popkeys()) == ["a", "b"]
+
+
+def test_bulk_update_mixed():
+    pq = minpq({i: i for i in range(100)})
+    pq.update({i: -i for i in range(50, 150)})
+    assert len(pq) == 150
+    assert list(pq.popvalues()) == sorted([*range(50), *(-i for i in range(50, 150))])
+
+
+def test_copy_pickle_repr():
+    pq = PQDict({"a": 2, "b": 1}, reverse=True)
+    clone = pq.copy()
+    clone.pop()
+    assert len(pq) == 2
+    assert copy.copy(pq) == pq
+    restored = pickle.loads(pickle.dumps(pq))
+    assert restored == pq and restored.reverse and restored.top() == "a"
+    assert repr(minpq(a=1)) == "PQDict({'a': 1})"
+
+
+def test_fromkeys_and_clear():
+    pq = PQDict.fromkeys("abc", 0)
+    assert pq == {"a": 0, "b": 0, "c": 0}
+    pq.clear()
+    assert not pq
+    pq["x"] = 1
+    assert pq.popitem() == ("x", 1)
+
+
+def test_payload_references_are_released():
+    import weakref
+
+    class Payload:
+        pass
+
+    obj = Payload()
+    ref = weakref.ref(obj)
+    pq = PQDict({"k": obj}, key=lambda _: 0)
+    pq.pop()
+    del obj
+    assert ref() is None
+
+
+def test_nsmallest_nlargest():
+    data = {k: (k * 37) % 101 for k in range(50)}
+    assert nsmallest(5, data) == sorted(data, key=data.get)[:5]
+    assert nlargest(5, data) == sorted(data, key=data.get, reverse=True)[:5]
+    assert nsmallest(2, data, key=lambda v: -v) == nlargest(2, data)
+    assert nsmallest(100, {}) == []
+
+
+def test_matches_pqdict_reference():
+    pqdict = pytest.importorskip("pqdict")
+    rng = random.Random(42)
+    ours, ref = PQDict(), pqdict.pqdict()
+    for _ in range(5000):
+        op = rng.random()
+        k = rng.randrange(200)
+        if op < 0.5:
+            ours[k] = ref[k] = rng.random()  # unique priorities: no tie ambiguity
+        elif op < 0.7 and k in ref:
+            assert ours.pop(k) == ref.pop(k)
+        elif op < 0.9 and ref:
+            assert ours.popitem() == ref.popitem()
+        assert len(ours) == len(ref)
+        if ref:
+            assert ours.topitem() == ref.topitem()
+    assert dict(ours) == dict(ref)
