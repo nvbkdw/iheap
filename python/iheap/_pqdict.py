@@ -41,6 +41,9 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
     Only priorities are sent to the native heap; keys and values stay in
     Python.
 
+    Not safe for concurrent mutation: guard a queue that several threads
+    modify with a lock (required on free-threaded Python).
+
     Args:
         data: Initial items, as a mapping or an iterable of ``(key, value)``
             pairs. Built in ``O(n)`` with a single native call.

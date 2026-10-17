@@ -34,8 +34,8 @@ assert list(pq.popitems()) == [("a", -1), ("d", 0), ("b", 1)]
 - **Two levels of API.** Use [`PQDict`][iheap.PQDict] for convenience, or the
   raw handle-based [`IndexedHeap`][iheap.IndexedHeap] when you manage your
   own storage.
-- **Easy to install.** Prebuilt `abi3` wheels for CPython ≥ 3.10 on Linux,
-  macOS and Windows. Typed (`py.typed`).
+- **Easy to install.** Prebuilt wheels for CPython ≥ 3.10 on Linux, macOS and
+  Windows, including free-threaded (no-GIL) 3.13t/3.14t. Typed (`py.typed`).
 
 ## Install
 
@@ -44,4 +44,5 @@ pip install iheap
 ```
 
 Next, read the [Getting started](getting-started.md) guide, browse the
-[API reference](api.md), or see the [benchmark](benchmark.md).
+[API reference](api.md), see how it works in [Design](design.md), or check the
+[benchmark](benchmark.md).

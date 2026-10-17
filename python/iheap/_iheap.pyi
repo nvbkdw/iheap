@@ -14,6 +14,10 @@ class IndexedHeap:
     Priorities must be convertible to ``float`` and not NaN. Integers are
     exact up to 2**53.
 
+    Thread safety: a heap may be shared between threads, including on
+    free-threaded Python. Each call runs under an internal lock, so
+    concurrent calls are serialized; sequences of calls are not atomic.
+
     Args:
         reverse: If true, the largest priority is on top (max-heap).
         capacity: Number of entries to pre-allocate room for.

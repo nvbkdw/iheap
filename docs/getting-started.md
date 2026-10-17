@@ -7,8 +7,9 @@ pip install iheap
 ```
 
 Wheels are published for CPython 3.10+ on Linux (x86_64/aarch64, glibc and
-musl), macOS (x86_64/arm64) and Windows (x64). On other platforms pip builds
-from source, which requires a [Rust toolchain](https://rustup.rs).
+musl), macOS (x86_64/arm64) and Windows (x64), including the free-threaded
+(no-GIL) builds of 3.13 and 3.14. On other platforms pip builds from source,
+which requires a [Rust toolchain](https://rustup.rs).
 
 ## The basics
 
@@ -208,5 +209,11 @@ is the fastest way to store data alongside them.
   tie-breaker in the priority itself.
 - **Bulk operations are faster.** `PQDict(data)` and `pq.update(many_items)`
   build in `O(n)` with one native call, which beats inserting in a loop.
-- **Thread safety** is the same as for `dict`: single operations are safe
-  under the GIL, but compound check-then-act sequences need your own lock.
+- **Thread safety.** [`IndexedHeap`][iheap.IndexedHeap] can be shared between
+  threads. Concurrent calls on one heap are serialized by an internal lock,
+  also on free-threaded Python, where importing `iheap` keeps the GIL
+  disabled. Compound sequences, such as `peek` then `update`, still need your
+  own lock to be atomic. **`PQDict` is not safe for concurrent mutation**: each
+  of its operations takes several steps across Python and the native heap.
+  Guard a `PQDict` that several threads modify with a `threading.Lock`; that
+  is required on free-threaded Python and recommended everywhere.

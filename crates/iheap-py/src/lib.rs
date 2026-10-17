@@ -2,10 +2,17 @@
 //!
 //! Only `f64` priorities and integer handles cross the FFI boundary; any data
 //! associated with a handle is owned by the Python caller.
+//!
+//! The module supports free-threaded Python: each heap is guarded by a mutex,
+//! so concurrent calls on one heap from several threads are serialized (like
+//! operations on a built-in `list`) instead of failing. The lock is never held
+//! while Python code runs (arguments are converted before it is taken), so it
+//! cannot deadlock against the interpreter.
 
 use iheap_core::{Error, Handle, IndexedHeap as CoreHeap, Order};
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyOverflowError, PyValueError};
 use pyo3::prelude::*;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 fn to_py_err(err: Error) -> PyErr {
     match err {
@@ -21,10 +28,23 @@ fn to_py_err(err: Error) -> PyErr {
 /// removed. Handles are small non-negative integers below ``handle_bound``
 /// and are recycled, so callers can keep per-entry data in a list indexed by
 /// handle.
-#[pyclass(module = "iheap._iheap", name = "IndexedHeap")]
-#[derive(Clone)]
+#[pyclass(module = "iheap._iheap", name = "IndexedHeap", frozen)]
 struct PyIndexedHeap {
-    inner: CoreHeap,
+    inner: Mutex<CoreHeap>,
+}
+
+impl PyIndexedHeap {
+    fn wrap(heap: CoreHeap) -> Self {
+        Self {
+            inner: Mutex::new(heap),
+        }
+    }
+
+    /// Every method body is panic-free on valid state, so a poisoned lock
+    /// still guards a consistent heap.
+    fn heap(&self) -> MutexGuard<'_, CoreHeap> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 #[pymethods]
@@ -33,51 +53,49 @@ impl PyIndexedHeap {
     #[pyo3(signature = (*, reverse = false, capacity = 0))]
     fn new(reverse: bool, capacity: usize) -> Self {
         let order = if reverse { Order::Max } else { Order::Min };
-        Self {
-            inner: CoreHeap::with_capacity(order, capacity),
-        }
+        Self::wrap(CoreHeap::with_capacity(order, capacity))
     }
 
     /// True for a max-heap.
     #[getter]
     fn reverse(&self) -> bool {
-        self.inner.order() == Order::Max
+        self.heap().order() == Order::Max
     }
 
     /// Every live handle is strictly below this value.
     #[getter]
     fn handle_bound(&self) -> usize {
-        self.inner.handle_bound()
+        self.heap().handle_bound()
     }
 
     fn __len__(&self) -> usize {
-        self.inner.len()
+        self.heap().len()
     }
 
     fn __bool__(&self) -> bool {
-        !self.inner.is_empty()
+        !self.heap().is_empty()
     }
 
     fn __contains__(&self, handle: i64) -> bool {
-        Handle::try_from(handle).is_ok_and(|h| self.inner.contains(h))
+        Handle::try_from(handle).is_ok_and(|h| self.heap().contains(h))
     }
 
-    fn push(&mut self, priority: f64) -> PyResult<Handle> {
-        self.inner.push(priority).map_err(to_py_err)
+    fn push(&self, priority: f64) -> PyResult<Handle> {
+        self.heap().push(priority).map_err(to_py_err)
     }
 
     /// Insert many priorities; returns their handles in input order.
-    fn push_many(&mut self, priorities: Vec<f64>) -> PyResult<Vec<Handle>> {
-        self.inner.push_many(&priorities).map_err(to_py_err)
+    fn push_many(&self, priorities: Vec<f64>) -> PyResult<Vec<Handle>> {
+        self.heap().push_many(&priorities).map_err(to_py_err)
     }
 
     /// ``(handle, priority)`` of the top entry, or ``None`` if empty.
     fn peek(&self) -> Option<(Handle, f64)> {
-        self.inner.peek()
+        self.heap().peek()
     }
 
-    fn pop(&mut self) -> PyResult<(Handle, f64)> {
-        self.inner
+    fn pop(&self) -> PyResult<(Handle, f64)> {
+        self.heap()
             .pop()
             .ok_or_else(|| PyIndexError::new_err("pop from an empty heap"))
     }
@@ -85,70 +103,72 @@ impl PyIndexedHeap {
     /// Fused push-then-pop. Returns ``None`` if the new entry would be popped
     /// immediately (heap unchanged); otherwise pops the top entry, reassigns
     /// its handle to the new entry and returns ``(handle, popped_priority)``.
-    fn push_pop(&mut self, priority: f64) -> PyResult<Option<(Handle, f64)>> {
-        self.inner.push_pop(priority).map_err(to_py_err)
+    fn push_pop(&self, priority: f64) -> PyResult<Option<(Handle, f64)>> {
+        self.heap().push_pop(priority).map_err(to_py_err)
     }
 
     /// Pop up to ``n`` entries in priority order.
-    fn pop_many(&mut self, n: usize) -> Vec<(Handle, f64)> {
-        self.inner.pop_many(n)
+    fn pop_many(&self, n: usize) -> Vec<(Handle, f64)> {
+        self.heap().pop_many(n)
     }
 
     fn priority(&self, handle: Handle) -> PyResult<f64> {
-        self.inner
+        self.heap()
             .priority(handle)
             .ok_or_else(|| to_py_err(Error::InvalidHandle(handle)))
     }
 
     /// Set the priority of ``handle``; returns the previous priority.
-    fn update(&mut self, handle: Handle, priority: f64) -> PyResult<f64> {
-        self.inner.update(handle, priority).map_err(to_py_err)
+    fn update(&self, handle: Handle, priority: f64) -> PyResult<f64> {
+        self.heap().update(handle, priority).map_err(to_py_err)
     }
 
     /// Set many priorities at once (atomic; last write wins on duplicates).
-    fn update_many(&mut self, handles: Vec<Handle>, priorities: Vec<f64>) -> PyResult<()> {
-        self.inner
+    fn update_many(&self, handles: Vec<Handle>, priorities: Vec<f64>) -> PyResult<()> {
+        self.heap()
             .update_many(&handles, &priorities)
             .map_err(to_py_err)
     }
 
     /// Remove ``handle``; returns its priority.
-    fn remove(&mut self, handle: Handle) -> PyResult<f64> {
-        self.inner.remove(handle).map_err(to_py_err)
+    fn remove(&self, handle: Handle) -> PyResult<f64> {
+        self.heap().remove(handle).map_err(to_py_err)
     }
 
     /// Remove every entry. Handle numbering restarts at 0.
-    fn clear(&mut self) {
-        self.inner.clear();
+    fn clear(&self) {
+        self.heap().clear();
     }
 
     /// Live ``(handle, priority)`` pairs in handle order (not priority order).
     fn items(&self) -> Vec<(Handle, f64)> {
-        self.inner.iter().collect()
+        self.heap().iter().collect()
     }
 
     fn copy(&self) -> Self {
-        self.clone()
+        Self::wrap(self.heap().clone())
     }
 
     fn __copy__(&self) -> Self {
-        self.clone()
+        self.copy()
     }
 
     fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
-        self.clone()
+        self.copy()
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "IndexedHeap(len={}, reverse={})",
-            self.inner.len(),
-            if self.reverse() { "True" } else { "False" }
-        )
+        let heap = self.heap();
+        let reverse = if heap.order() == Order::Max {
+            "True"
+        } else {
+            "False"
+        };
+        format!("IndexedHeap(len={}, reverse={reverse})", heap.len())
     }
 }
 
-#[pymodule]
+#[pymodule(gil_used = false)]
 fn _iheap(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyIndexedHeap>()?;
     Ok(())

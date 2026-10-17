@@ -10,6 +10,7 @@ nav:
   - Home: index.md
   - Getting started: getting-started.md
   - API reference: api.md
+  - Design: design.md
   - Benchmark: benchmark.md
   - Development: development.md
 

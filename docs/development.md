@@ -44,7 +44,7 @@ crates/iheap-core/     pure-Rust core: no PyO3
   src/key.rs           order-preserving f64 -> u64 key encoding
   tests/model.rs       randomized differential test against a HashMap model
   examples/bench.rs    core-only micro-benchmark
-crates/iheap-py/       thin PyO3 binding (abi3-py310) -> iheap._iheap
+crates/iheap-py/       thin PyO3 binding -> iheap._iheap (abi3-py310; free-threading safe)
 python/iheap/          Python package
   _pqdict.py           PQDict mapping API
   _iheap.pyi           type stub + docs for the native module
@@ -103,8 +103,10 @@ that stub in sync with `crates/iheap-py/src/lib.rs`.
 1. Bump `version` in the root `Cargo.toml`. It is the single source of truth;
    the Python package version is derived from it.
 2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
-3. CI tests on Linux, macOS and Windows, builds `abi3` wheels for 7 platform
-   targets plus an sdist, and publishes to PyPI through
+3. CI tests on Linux, macOS and Windows (CPython 3.10, 3.14 and free-threaded
+   3.14t). It builds `abi3` wheels for 7 platform targets, free-threaded
+   `cp313t`/`cp314t` wheels for the same targets (abi3 cannot load on
+   free-threaded CPython) and an sdist, then publishes them to PyPI through
    [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (no API
    token is stored).
 
