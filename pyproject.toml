@@ -26,9 +26,12 @@ dynamic = ["version"]
 [project.urls]
 Repository = "https://github.com/nvbkdw/iheap"
 Issues = "https://github.com/nvbkdw/iheap/issues"
+Documentation = "https://nvbkdw.github.io/iheap/"
 
 [dependency-groups]
 dev = ["maturin>=1.7,<2", "pytest>=8", "pqdict>=1.4"]
+# mkdocs 2.0 drops the plugin system that mkdocs-material/mkdocstrings need.
+docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5", "mkdocstrings[python]>=0.26", "ruff"]
 
 [tool.maturin]
 manifest-path = "crates/iheap-py/Cargo.toml"
@@ -38,4 +41,5 @@ features = ["pyo3/extension-module"]
 profile = "release"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "python/iheap"]
+addopts = "--doctest-modules"

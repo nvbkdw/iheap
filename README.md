@@ -19,6 +19,9 @@ list(pq.popitems())                     # [('a', -1), ('d', 0), ('b', 1)]
 pip install iheap
 ```
 
+📖 **Documentation:** <https://nvbkdw.github.io/iheap/>. It covers a
+getting-started guide, the API reference, the benchmark and development notes.
+
 Prebuilt `abi3` wheels cover CPython ≥ 3.10 on Linux (glibc and musl, x86_64
 and aarch64), macOS (x86_64 and arm64) and Windows (x64).
 
