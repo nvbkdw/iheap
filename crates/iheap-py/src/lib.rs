@@ -33,7 +33,14 @@ fn to_py_err(err: Error) -> PyErr {
 
 /// A handle argument: `Ok(None)` for an int-like outside the handle range
 /// (it cannot name a live entry), `TypeError` for a non-integer.
+#[inline]
 fn handle_arg(obj: &Bound<'_, PyAny>) -> PyResult<Option<Handle>> {
+    // Fast path: an exact `int` in range (the overwhelmingly common case).
+    if let Ok(int) = obj.cast_exact::<pyo3::types::PyInt>() {
+        if let Ok(h) = int.extract::<Handle>() {
+            return Ok(Some(h));
+        }
+    }
     match obj.extract::<Handle>() {
         Ok(h) => Ok(Some(h)),
         Err(e) if e.is_instance_of::<PyOverflowError>(obj.py()) => Ok(None),
@@ -77,6 +84,11 @@ fn count(obj: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
 /// handle.
 #[pyclass(module = "iheap._iheap", name = "IndexedHeap", frozen)]
 struct PyIndexedHeap(SharedHeap);
+
+// The struct lives inside a Python object, which CPython only guarantees to
+// be 8-byte aligned on 32-bit platforms; over-aligned contents would be
+// misaligned there (and crash on aligned SIMD moves).
+const _: () = assert!(std::mem::align_of::<PyIndexedHeap>() <= 8);
 
 impl PyIndexedHeap {
     fn wrap(heap: CoreHeap) -> Self {
@@ -212,7 +224,8 @@ impl PyIndexedHeap {
     /// Set the priority of ``handle``; returns the previous priority.
     fn update(&self, handle: &Bound<'_, PyAny>, priority: f64) -> PyResult<f64> {
         if priority.is_nan() {
-            return Err(to_py_err(Error::NanPriority)); // priority errors first
+            // Priority errors take precedence, even over an unusable handle.
+            return Err(to_py_err(Error::NanPriority));
         }
         let h = live_handle(handle)?;
         self.0

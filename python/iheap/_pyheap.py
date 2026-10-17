@@ -11,12 +11,11 @@ Layout: an indexed binary min-heap. ``_heap`` lists handles in heap order;
 index in ``_heap``. A max-heap stores negated priorities. Each heap has a lock,
 so concurrent calls serialize, as with the native core.
 
-Exception safety: every sift is *planned* first (all comparisons, no writes)
-and only then *applied* (writes, no comparisons). Float comparisons cannot
-fail, but :class:`~iheap.ObjectHeap` reuses this class with user objects whose
-comparisons may raise; planning first means such an error leaves the heap
-untouched. Batch operations additionally snapshot the arrays when comparisons
-may raise.
+Float comparisons cannot fail, so this core sifts in place in a single pass.
+:class:`~iheap.ObjectHeap` reuses the class with user objects whose
+comparisons may raise; it overrides the sift-based internals (``_push``,
+``_pop``, ``_move``, ``_push_pop``, ``_remove``, ``_heapify``) with versions
+that plan every move before writing, so an error leaves the heap untouched.
 """
 
 from __future__ import annotations
@@ -70,9 +69,6 @@ class IndexedHeap:
     def _decode(self, key: Any) -> Any:
         return key * self._sign
 
-    def _check(self, keys: list[Any]) -> None:
-        """Called with the lock held, before mutating, with all new keys."""
-
     # -- internals (callers hold the lock) ----------------------------------
 
     def _reset(self) -> None:
@@ -121,36 +117,29 @@ class IndexedHeap:
         self._pos[handle] = -1
         self._free.append(handle)
 
-    def _plan_up(self, index: int, key: Any) -> int:
-        """Index where ``key`` would settle moving up from ``index`` (reads only)."""
-        heap, keys = self._heap, self._keys
+    # Sift-based internals. Single-pass "hole" sifts: a parent or child moves
+    # into the hole instead of swapping. Comparisons on floats never raise;
+    # ObjectHeap overrides these with plan-then-apply versions.
+
+    def _sift_up(self, index: int, handle: int, key: Any) -> None:
+        heap, keys, pos = self._heap, self._keys, self._pos
         while index > 0:
             parent = (index - 1) >> 1
-            if key >= keys[heap[parent]]:
-                break
-            index = parent
-        return index
-
-    def _apply_up(self, index: int, target: int, handle: int) -> None:
-        heap, pos = self._heap, self._pos
-        while index > target:
-            parent = (index - 1) >> 1
             ph = heap[parent]
+            if key >= keys[ph]:
+                break
             heap[index] = ph
             pos[ph] = index
             index = parent
         heap[index] = handle
         pos[handle] = index
 
-    def _plan_down(self, index: int, key: Any, n: int) -> list[int]:
-        """Child indices that ``key`` would descend through from ``index``,
-        within the first ``n`` heap slots (reads only)."""
-        heap, keys = self._heap, self._keys
-        path = []
+    def _sift_down(self, index: int, handle: int, key: Any, n: int) -> None:
+        heap, keys, pos = self._heap, self._keys, self._pos
         while True:
             child = 2 * index + 1
             if child >= n:
-                return path
+                break
             ck = keys[heap[child]]
             right = child + 1
             if right < n:
@@ -158,13 +147,7 @@ class IndexedHeap:
                 if rk < ck:
                     child, ck = right, rk
             if ck >= key:
-                return path
-            path.append(child)
-            index = child
-
-    def _apply_down(self, index: int, path: list[int], handle: int) -> None:
-        heap, pos = self._heap, self._pos
-        for child in path:
+                break
             ch = heap[child]
             heap[index] = ch
             pos[ch] = index
@@ -174,15 +157,12 @@ class IndexedHeap:
 
     def _move(self, index: int, handle: int, key: Any, n: int) -> None:
         """Give ``handle`` (at ``index``) the key ``key`` and settle it within
-        the first ``n`` slots: plans in either direction, then writes."""
+        the first ``n`` slots."""
+        self._keys[handle] = key
         if index > 0 and key < self._keys[self._heap[(index - 1) >> 1]]:
-            target = self._plan_up(index, key)
-            self._keys[handle] = key
-            self._apply_up(index, target, handle)
+            self._sift_up(index, handle, key)
         else:
-            path = self._plan_down(index, key, n)
-            self._keys[handle] = key
-            self._apply_down(index, path, handle)
+            self._sift_down(index, handle, key, n)
 
     def _heapify(self) -> None:
         heap, keys = self._heap, self._keys
@@ -191,12 +171,11 @@ class IndexedHeap:
         n = len(heap)
         for index in reversed(range(n // 2)):
             handle = heap[index]
-            self._apply_down(index, self._plan_down(index, keys[handle], n), handle)
+            self._sift_down(index, handle, keys[handle], n)
 
     def _push(self, key: Any) -> int:
-        target = self._plan_up(len(self._heap), key)  # as if already appended
         handle = self._allocate(key)
-        self._apply_up(len(self._heap) - 1, target, handle)
+        self._sift_up(len(self._heap) - 1, handle, key)
         return handle
 
     def _pop(self) -> tuple[int, Any]:
@@ -204,17 +183,30 @@ class IndexedHeap:
         if not heap:
             raise IndexError("pop from an empty heap")
         top = heap[0]
-        n = len(heap)
-        if n > 1:
-            last = heap[n - 1]
-            path = self._plan_down(0, keys[last], n - 1)  # `last` moves to the root
-            heap.pop()
-            self._apply_down(0, path, last)
-        else:
-            heap.pop()
+        last = heap.pop()
+        if heap:
+            self._sift_down(0, last, keys[last], len(heap))
         key = keys[top]
         self._release(top)
         return top, self._decode(key)
+
+    def _push_pop(self, key: Any) -> tuple[int, Any]:
+        """Replace the top's key with ``key`` (caller checked it loses)."""
+        top = self._heap[0]
+        old = self._keys[top]
+        self._keys[top] = key
+        self._sift_down(0, top, key, len(self._heap))
+        return top, self._decode(old)
+
+    def _remove(self, h: int) -> Any:
+        heap, keys = self._heap, self._keys
+        index = self._pos[h]
+        key = keys[h]
+        last = heap.pop()
+        if index < len(heap):
+            self._move(index, last, keys[last], len(heap))
+        self._release(h)
+        return self._decode(key)
 
     def _items(self) -> list[tuple[int, Any]]:
         decode = self._decode
@@ -249,13 +241,11 @@ class IndexedHeap:
     def push(self, priority: Any) -> int:
         key = self._key(priority)
         with self._lock:
-            self._check([key])
             return self._push(key)
 
     def push_many(self, priorities: Iterable[Any]) -> list[int]:
         keys = [self._key(p) for p in priorities]  # validate all first: atomic
         with self._lock, self._transaction():
-            self._check(keys)
             bound = len(self._keys) + max(0, len(keys) - len(self._free))
             if self._prefer_rebuild(len(keys), len(self._heap) + len(keys), bound):
                 handles = [self._allocate(key) for key in keys]
@@ -277,15 +267,10 @@ class IndexedHeap:
     def push_pop(self, priority: Any) -> tuple[int, Any] | None:
         key = self._key(priority)
         with self._lock:
-            heap, keys = self._heap, self._keys
-            if not heap or keys[heap[0]] >= key:
+            heap = self._heap
+            if not heap or self._keys[heap[0]] >= key:
                 return None
-            top = heap[0]
-            old = keys[top]
-            path = self._plan_down(0, key, len(heap))
-            keys[top] = key
-            self._apply_down(0, path, top)
-            return top, self._decode(old)
+            return self._push_pop(key)
 
     def pop_many(self, n: Any) -> list[tuple[int, Any]]:
         n = max(0, operator.index(n))
@@ -300,7 +285,6 @@ class IndexedHeap:
         key = self._key(priority)
         with self._lock:
             h = self._live(handle)
-            self._check([key])
             old = self._keys[h]
             self._move(self._pos[h], h, key, len(self._heap))
             return self._decode(old)
@@ -312,7 +296,6 @@ class IndexedHeap:
         keys = [self._key(p) for p in priorities]
         with self._lock, self._transaction():
             hs = [self._live(h) for h in handles]  # validate all first: atomic
-            self._check(keys)
             if self._prefer_rebuild(len(keys), len(self._heap), len(self._keys)):
                 for h, key in zip(hs, keys):
                     self._keys[h] = key
@@ -323,27 +306,7 @@ class IndexedHeap:
 
     def remove(self, handle: Any) -> Any:
         with self._lock:
-            h = self._live(handle)
-            heap, keys = self._heap, self._keys
-            index, n = self._pos[h], len(heap)
-            key = keys[h]
-            last = heap[n - 1]
-            if index == n - 1:
-                heap.pop()
-            else:
-                # Plan where `last` settles at `index`, among the n - 1 slots
-                # that remain, before changing anything.
-                last_key = keys[last]
-                if index > 0 and last_key < keys[heap[(index - 1) >> 1]]:
-                    target = self._plan_up(index, last_key)
-                    heap.pop()
-                    self._apply_up(index, target, last)
-                else:
-                    path = self._plan_down(index, last_key, n - 1)
-                    heap.pop()
-                    self._apply_down(index, path, last)
-            self._release(h)
-            return self._decode(key)
+            return self._remove(self._live(handle))
 
     def clear(self) -> None:
         with self._lock:
@@ -376,7 +339,6 @@ class IndexedHeap:
             raise ValueError("invalid heap state: handles must cover the bound exactly once")
         heap = cls(reverse=reverse)
         keys = [heap._key(p) for _, p in entries]
-        heap._check(keys)
         heap._keys = [None] * bound
         heap._pos = [-1] * bound
         for (h, _), key in zip(entries, keys):

@@ -139,6 +139,7 @@ def test_fromkeys_and_clear():
 
 
 def test_payload_references_are_released():
+    import gc
     import weakref
 
     class Payload:
@@ -149,6 +150,7 @@ def test_payload_references_are_released():
     pq = PQDict({"k": obj}, key=lambda k, v: 0)
     pq.pop()
     del obj
+    gc.collect()  # PyPy has no reference counting
     assert ref() is None
 
 

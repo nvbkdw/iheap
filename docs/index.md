@@ -34,8 +34,14 @@ assert list(pq.popitems()) == [("a", -1), ("d", 0), ("b", 1)]
 - **Two levels of API.** Use [`PQDict`][iheap.PQDict] for convenience, or the
   raw handle-based [`IndexedHeap`][iheap.IndexedHeap] when you manage your
   own storage.
-- **Easy to install.** Prebuilt wheels for CPython ≥ 3.10 on Linux, macOS and
-  Windows, including free-threaded (no-GIL) 3.14t. Typed (`py.typed`).
+- **Any priority.** Numbers run on the Rust core; strings, tuples, dates and
+  other comparable objects switch a queue to an exact object core
+  automatically.
+- **Runs everywhere.** CPython 3.11+ with native wheels for Linux (x86_64,
+  i686, aarch64, armv7, ppc64le, s390x; glibc and musl), macOS and Windows
+  (x64, x86, arm64), free-threaded 3.14t/3.15t+, and a pure-Python core for
+  everything else (3.13t, PyPy, Pyodide). The best core is chosen
+  automatically and can be configured. Typed (`py.typed`).
 
 ## Install
 

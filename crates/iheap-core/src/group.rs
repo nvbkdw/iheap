@@ -18,8 +18,13 @@ pub(crate) const FANOUT: usize = 8;
 /// Winner (smallest key) of a subtree and the leaf holding it. Two full `u64`s
 /// (a handle fits in the low half): writing a node is then a single 16-byte
 /// store, and SIMD code may load whole nodes.
+///
+/// Deliberately *not* over-aligned: `IndexedHeap` embeds one (its root), and
+/// Python allocates the objects embedding a heap with only 8-byte alignment
+/// on 32-bit platforms. Groups, which want cache-line alignment, declare it
+/// themselves and always live in `Vec`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(C, align(16))]
+#[repr(C)]
 pub(crate) struct Node {
     pub(crate) key: u64,
     leaf: u64,

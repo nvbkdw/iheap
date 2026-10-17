@@ -46,9 +46,10 @@ crates/iheap-core/     pure-Rust core: no PyO3
   examples/bench.rs    core-only micro-benchmark
 crates/iheap-py/       thin PyO3 binding -> iheap._iheap (abi3-py310; free-threading safe)
 python/iheap/          Python package
-  _core.py             picks the core: native extension, else pure Python
+  _core.py             backends: native extension or pure Python (IHEAP_BACKEND)
   _pyheap.py           pure-Python IndexedHeap (fallback, same API)
-  _pqdict.py           PQDict mapping API
+  _objheap.py          ObjectHeap: arbitrary comparable priorities
+  _pqdict.py           PQDict mapping API, priority_type selection
   _iheap.pyi           type stub + docs for the native module
 scripts/make_pure_wheel.py   derives the py3-none-any fallback wheel
 tests/                 pytest suite (incl. differential tests vs dict and pqdict)
@@ -61,7 +62,7 @@ Python interpreter, and the core could be published to crates.io unchanged.
 
 ## Setup
 
-You need Rust (stable) and Python ≥ 3.10.
+You need Rust (1.88 or later) and Python ≥ 3.11.
 
 ```bash
 uv venv
@@ -78,7 +79,7 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test -p iheap-core          # Rust: unit tests + randomized model test
 pytest                            # Python: tests/, doctests, docs code blocks
-IHEAP_PURE_PYTHON=1 pytest        # the same suite against the pure-Python core
+IHEAP_BACKEND=python pytest       # the same suite against the pure-Python core
 ```
 
 The pytest suite includes:
@@ -107,18 +108,26 @@ that stub in sync with `crates/iheap-py/src/lib.rs`.
 1. Bump `version` in the root `Cargo.toml`. It is the single source of truth;
    the Python package version is derived from it.
 2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
-3. CI tests on Linux, macOS and Windows (CPython 3.10, 3.14 and free-threaded
-   3.14t), each against both the native and the pure-Python core. It builds:
-   - `abi3` wheels for 7 platform targets (GIL-specialized core);
-   - free-threaded `cp314t` wheels for the same targets (mutex core; `abi3`
-     cannot load on free-threaded CPython);
-   - the pure-Python `py3-none-any` wheel, which is then installed and tested
-     on CPython 3.13t;
-   - an sdist.
-
-   Everything is published to PyPI through
-   [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (no API
-   token is stored).
+3. CI then runs, in order:
+   - **Rust:** fmt, clippy, tests, an MSRV (1.88) check, and the core's tests
+     on i686, armv7, s390x and ppc64le under emulation.
+   - **Python from source:** CPython 3.11–3.15, 3.14t and 3.15t on Linux, and
+     3.11/3.15/3.15t on macOS and Windows, each against both the native and
+     the pure-Python core.
+   - **Wheels:**
+     - `cp311-abi3` for 15 targets: Linux glibc (x86_64, i686, aarch64,
+       armv7, ppc64le, s390x), Linux musl (x86_64, i686, aarch64, armv7),
+       Windows (x64, x86, arm64), macOS (x86_64, arm64);
+     - free-threaded `cp314t` and `cp315-abi3t` for the 64-bit targets;
+     - the pure `py3-none-any` wheel and the sdist.
+   - **Testing what ships:** every wheel is installed the way pip would choose
+     it and the suite is run, natively, under QEMU for the other
+     architectures, and on CPython 3.13t and PyPy for the pure wheel. The
+     sdist is built from source and tested.
+   - **Publishing:** only if all of that passes, and only if the tag matches
+     the package version, everything goes to PyPI through
+     [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (no API
+     token is stored).
 
 Docs are rebuilt with `mkdocs build --strict` on every push and deployed to
 GitHub Pages on every push to `main`.

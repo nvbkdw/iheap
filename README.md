@@ -22,18 +22,23 @@ pip install iheap
 📖 **Documentation:** <https://nvbkdw.github.io/iheap/>. It covers a
 getting-started guide, the API reference, the benchmark and development notes.
 
-pip picks the best implementation for your interpreter automatically:
+iheap runs on CPython 3.11+ on every platform. pip picks the best
+implementation for your interpreter automatically:
 
 | Interpreter | Core |
 |---|---|
-| CPython ≥ 3.10 with the GIL | native Rust (`abi3` wheel), lock-free: the GIL is the lock |
+| CPython ≥ 3.11 with the GIL | native Rust (`cp311-abi3` wheel), lock-free: the GIL is the lock |
 | CPython 3.14t, free-threaded | native Rust (`cp314t` wheel), mutex per heap |
-| CPython 3.13t, PyPy, other platforms | pure Python (`py3-none-any` wheel), same API |
+| CPython 3.15t+, free-threaded | native Rust (`cp315-abi3t` wheel), mutex per heap |
+| CPython 3.13t, PyPy, GraalPy, Pyodide, … | pure Python (`py3-none-any` wheel), same API |
 
-Native wheels cover Linux (glibc and musl, x86_64 and aarch64), macOS
-(x86_64 and arm64) and Windows (x64). `iheap.NATIVE` tells you which core
-you got. `IndexedHeap` is safe to share between threads; guard a `PQDict`
-that several threads mutate with a lock.
+Native wheels cover Linux glibc (x86_64, i686, aarch64, armv7, ppc64le,
+s390x), Linux musl (x86_64, i686, aarch64, armv7), macOS (x86_64, arm64) and
+Windows (x64, x86, arm64). `iheap.NATIVE` tells you whether the Rust core is
+the default, and `pq.core` which core a queue uses. Override the choice with
+`IHEAP_BACKEND=auto|native|python` or `PQDict(..., backend=...)`.
+`IndexedHeap` is safe to share between threads; guard a `PQDict` that several
+threads mutate with a lock.
 
 ## Design
 
@@ -80,11 +85,18 @@ values (the payload) never leave Python.
 
 ## API
 
-### `PQDict(data=None, *, key=None, reverse=False)`
+### `PQDict(data=None, *, key=None, reverse=False, priority_type="auto", backend=None)`
 
 A `MutableMapping` whose items are ordered by priority. The priority is
 `key(item_key, value)` if a `key` function is given, otherwise the value itself.
 `reverse=True` makes it a max-queue. Ties are popped in unspecified order.
+
+Priorities can be numbers or any objects that support `<` (strings, tuples,
+dates, …). With `priority_type="auto"` a queue runs on the Rust core while
+every priority is exactly representable as a `float`, and moves once to the
+pure-Python object core otherwise, so ordering is always exact. Pin
+`priority_type="float"` (numeric only; fastest) or `"object"`. `backend`
+chooses the numeric core: `"auto"`, `"native"` or `"python"`.
 
 `PQDict` supports **every `dict` operation**: `pq[k]`, `pq[k] = v`,
 `del pq[k]`, `k in pq`, `len`, `iter`, `reversed`, `get`, `setdefault`,
@@ -101,20 +113,24 @@ inserted.
 | `pop()`, `popvalue(default)`, `popitem()` | remove the top item (`pop(key[, default])` keeps dict semantics) |
 | `additem(k, v)` / `updateitem(k, v)` | strict insert / strict update |
 | `pushpopitem(k, v)` | push then pop, done as a single tree replay |
-| `replace_key(k, new_k)`, `swap_priority(k1, k2)` | change keys in place (no heap work) |
+| `replace_key(k, new_k)`, `swap_priority(k1, k2)` | change keys in place (recomputes priorities if a `key` function is set) |
 | `popkeys()`, `popvalues()`, `popitems()` | destructive iteration in priority order |
 | `heapify(key=None)` | re-prioritize after a value was mutated in place |
 | `update(mapping)` | bulk insert/update with one native call (atomic) |
 | `copy()`, pickling, `fromkeys()` | |
+| `core` | `"native"`, `"python"` or `"object"`: the core in use right now |
 
-Module functions: `minpq(**kw)`, `maxpq(**kw)`, `nsmallest(n, mapping, key=None)`,
-`nlargest(n, mapping, key=None)`.
+Module functions: `minpq(**kw)`, `maxpq(**kw)`,
+`nsmallest(n, mapping, key=None, priority_type="auto", backend=None)`,
+`nlargest(...)` (same arguments), `heap_class(backend)`.
+
+`ObjectHeap(*, reverse=False)` is the low-level heap for arbitrary comparable
+priorities, with the same API as `IndexedHeap`.
 
 Differences from `pqdict`:
 
-- priorities are numbers by default, running on the Rust core. Any
-  comparable objects (strings, tuples, dates, …) work with
-  `priority_type="object"`, on a pure-Python core;
+- priorities that aren't exact floats (strings, tuples, big integers, …) are
+  handled by a pure-Python core, and numbers by the Rust core, automatically;
 - the custom comparator `precedes=` is replaced by `reverse=`;
 - the `key` function receives the item's key as well as its value,
   `key(item_key, value)`. To port `key=f`, write `key=lambda k, v: f(v)`.
@@ -161,35 +177,36 @@ Implementations compared:
   Python docs. Its update and delete are cheap because they defer the work
   to pop.
 
-Results on Apple M4 Max, CPython 3.13.7, iheap 0.1.0. Each cell is **ns per
+Results on Apple M4 Max, CPython 3.13.7, iheap 0.3.0. Each cell is **ns per
 operation, lower is better**, with the speed-up over `pqdict` in parentheses.
+`PQDict` runs with the default `priority_type="auto"`.
 
 **n = 10,000**
 
 | implementation | insert | build | update | delete | pop |
 |---|---:|---:|---:|---:|---:|
-| iheap.PQDict | 155 (3.4x) | 48 (11.6x) | 122 (7.1x) | 134 (5.6x) | 139 (16.7x) |
-| iheap.IndexedHeap | 56 (9.4x) | 38 (14.4x) | 55 (15.6x) | 70 (10.8x) | 87 (26.6x) |
-| pqdict | 527 | 552 | 867 | 759 | 2,322 |
-| heapq (lazy) | 185 (2.9x) | 114 (4.9x) | 234 (3.7x) | 76 (9.9x) | 425 (5.5x) |
+| iheap.PQDict | 239 (2.2x) | 60 (9.0x) | 153 (5.5x) | 134 (5.5x) | 141 (15.6x) |
+| iheap.IndexedHeap | 58 (8.9x) | 37 (14.5x) | 59 (14.3x) | 71 (10.4x) | 89 (24.7x) |
+| pqdict | 518 | 540 | 843 | 744 | 2,201 |
+| heapq (lazy) | 184 (2.8x) | 109 (5.0x) | 199 (4.2x) | 75 (10.0x) | 383 (5.7x) |
 
 **n = 100,000**
 
 | implementation | insert | build | update | delete | pop |
 |---|---:|---:|---:|---:|---:|
-| iheap.PQDict | 178 (3.4x) | 61 (11.1x) | 264 (6.0x) | 317 (4.5x) | 293 (14.9x) |
-| iheap.IndexedHeap | 75 (8.0x) | 53 (12.6x) | 118 (13.5x) | 149 (9.5x) | 184 (23.8x) |
-| pqdict | 603 | 674 | 1,593 | 1,415 | 4,376 |
-| heapq (lazy) | 237 (2.5x) | 147 (4.6x) | 487 (3.3x) | 283 (5.0x) | 970 (4.5x) |
+| iheap.PQDict | 190 (3.0x) | 58 (10.4x) | 236 (6.3x) | 231 (5.1x) | 226 (16.1x) |
+| iheap.IndexedHeap | 70 (8.1x) | 50 (12.1x) | 92 (16.1x) | 125 (9.4x) | 124 (29.4x) |
+| pqdict | 570 | 603 | 1,475 | 1,177 | 3,637 |
+| heapq (lazy) | 218 (2.6x) | 134 (4.5x) | 411 (3.6x) | 198 (5.9x) | 867 (4.2x) |
 
 **n = 1,000,000**
 
 | implementation | insert | build | update | delete | pop |
 |---|---:|---:|---:|---:|---:|
-| iheap.PQDict | 260 (3.0x) | 110 (8.6x) | 660 (4.1x) | 760 (3.3x) | 754 (11.9x) |
-| iheap.IndexedHeap | 151 (5.1x) | 87 (10.9x) | 459 (5.9x) | 491 (5.1x) | 614 (14.6x) |
-| pqdict | 769 | 950 | 2,688 | 2,512 | 8,977 |
-| heapq (lazy) | 360 (2.1x) | 245 (3.9x) | 860 (3.1x) | 552 (4.6x) | 2,473 (3.6x) |
+| iheap.PQDict | 285 (2.6x) | 97 (9.3x) | 690 (3.8x) | 761 (3.3x) | 739 (11.7x) |
+| iheap.IndexedHeap | 148 (5.0x) | 85 (10.6x) | 423 (6.3x) | 498 (5.0x) | 605 (14.3x) |
+| pqdict | 733 | 903 | 2,646 | 2,511 | 8,645 |
+| heapq (lazy) | 375 (2.0x) | 265 (3.4x) | 885 (3.0x) | 623 (4.0x) | 2,423 (3.6x) |
 
 ### The Rust core alone
 
@@ -199,9 +216,9 @@ with the 4-ary binary heap used at first, in ns per operation:
 
 | n | insert | build | update | delete | pop |
 |---:|---:|---:|---:|---:|---:|
-| 10k | 3.0 → 3.0 (1.0×) | 3.5 → 2.2 (1.6×) | 3.2 → 2.0 (1.6×) | 3.9 → 2.5 (1.6×) | 25.2 → 17.1 (1.5×) |
-| 100k | 5.3 → 4.3 (1.2×) | 4.1 → 2.1 (2.0×) | 10.5 → 3.5 (3.0×) | 5.9 → 3.1 (1.9×) | 37.5 → 20.3 (1.8×) |
-| 1M | 8.0 → 4.9 (1.6×) | 4.7 → 2.6 (1.8×) | 18.2 → 5.6 (3.2×) | 14.1 → 5.4 (2.6×) | 64.0 → 29.6 (2.2×) |
+| 10k | 3.0 → 2.9 (1.0×) | 3.5 → 2.3 (1.5×) | 3.2 → 1.9 (1.7×) | 3.9 → 2.5 (1.6×) | 25.2 → 17.3 (1.5×) |
+| 100k | 5.3 → 3.9 (1.4×) | 4.1 → 2.2 (1.9×) | 10.5 → 2.9 (3.6×) | 5.9 → 3.0 (2.0×) | 37.5 → 20.6 (1.8×) |
+| 1M | 8.0 → 4.9 (1.6×) | 4.7 → 2.6 (1.8×) | 18.2 → 5.3 (3.4×) | 14.1 → 5.8 (2.4×) | 64.0 → 29.2 (2.2×) |
 
 From n = 100k up, the core is **2.1× faster** (geometric mean over the five
 operations). In the Python benchmark above, the core accounts for only 5–20%

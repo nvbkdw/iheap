@@ -128,7 +128,9 @@ impl IndexedHeap {
             return Err(Error::CapacityOverflow);
         }
         // Recycled handles come first; only the rest extend `bound`.
-        let bound = self.bound + keys.len().saturating_sub(self.free.len());
+        let bound = self
+            .bound
+            .saturating_add(keys.len().saturating_sub(self.free.len()));
         let rebuild = prefer_rebuild(keys.len(), self.len + keys.len(), bound);
         self.reserve_leaves(bound)?; // all memory up front: the loop cannot fail
         let mut handles = Vec::with_capacity(keys.len());
@@ -329,7 +331,10 @@ impl IndexedHeap {
             None => {
                 if self.bound == self.leaves.len() * FANOUT {
                     // Grow by half again (amortized O(1)), not one group at a time.
-                    let target = (self.bound + self.bound / 2).clamp(self.bound + 1, MAX_LEN);
+                    let target = self
+                        .bound
+                        .saturating_add(self.bound / 2)
+                        .clamp(self.bound + 1, MAX_LEN);
                     self.reserve_leaves(target)?;
                 }
                 self.bound += 1;
@@ -750,10 +755,13 @@ mod tests {
 
     #[test]
     fn capacity_errors_instead_of_aborting() {
-        assert_eq!(
-            IndexedHeap::try_with_capacity(Order::Min, MAX_LEN + 1).unwrap_err(),
-            Error::CapacityOverflow
-        );
+        // Not representable on 32-bit targets, where MAX_LEN == usize::MAX.
+        if let Some(too_many) = MAX_LEN.checked_add(1) {
+            assert_eq!(
+                IndexedHeap::try_with_capacity(Order::Min, too_many).unwrap_err(),
+                Error::CapacityOverflow
+            );
+        }
         // The infallible constructor treats capacity as a hint.
         assert!(IndexedHeap::with_capacity(Order::Min, usize::MAX).is_empty());
     }

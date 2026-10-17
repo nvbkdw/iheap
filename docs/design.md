@@ -17,9 +17,12 @@ These constraints shaped the design:
 1. **The payload stays in Python.** Only priorities and integer handles cross
    the Python ↔ Rust boundary. Rust never holds or calls a Python object.
    Keys and values are never copied, converted or pickled.
-2. **Priorities are `float`s.** Native comparisons are the whole point of a
-   native core. Any Python object that `float()` accepts works. NaN, which has
-   no order, is rejected.
+2. **Numeric priorities run natively.** Native comparisons are the whole
+   point of a native core, so the Rust core orders `f64`s. Priorities that a
+   `float` can't represent exactly (strings, tuples, big integers, …) are
+   handled by a pure-Python object core instead (see
+   [Generic priorities](#generic-priorities)). NaN, which has no order, is
+   always rejected.
 3. **Speed first, without `unsafe` shortcuts.** The core is safe Rust except
    for SIMD intrinsics, each with a `SAFETY` comment. Every optimization was
    measured, and the ones that didn't pay were removed.
@@ -351,9 +354,18 @@ interpreter, so `iheap` ships three implementations of the same
 
 | Interpreter | Wheel | Core | Synchronization | Cost per call |
 |---|---|---|---|---|
-| CPython ≥ 3.10 with GIL | `cp310-abi3` | Rust | the GIL itself | 16–20 ns |
-| CPython 3.14t (no GIL) | `cp314-cp314t` | Rust | `Mutex` per heap | 18–24 ns |
-| CPython 3.13t, PyPy, … | `py3-none-any` | pure Python | `threading.Lock` per heap | ~10× native |
+| CPython ≥ 3.11 with GIL | `cp311-abi3` | Rust | the GIL itself | 15–24 ns |
+| CPython 3.14t (no GIL) | `cp314-cp314t` | Rust | `Mutex` per heap | 18–27 ns |
+| CPython 3.15t+ (no GIL) | `cp315-abi3t` | Rust | `Mutex` per heap | 18–27 ns |
+| CPython 3.13t, PyPy, GraalPy, … | `py3-none-any` | pure Python | `threading.Lock` per heap | ~10× native |
+
+**Free-threaded 3.15+ wheels use the free-threaded stable ABI** (`abi3t`,
+PEP 803): one wheel per platform serves 3.15t and every later free-threaded
+version. PyO3 builds `abi3t` with `Py_GIL_DISABLED` set, so it always carries
+the mutex core. maturin tags such wheels `abi3.abi3t`, which also matches
+GIL-enabled 3.15, and installers would prefer it there over `cp311-abi3`
+because it targets a newer version. CI therefore retags them `abi3t` only, so
+GIL-enabled interpreters keep the faster lock-free core.
 
 The per-call cost is for the cheapest calls (`peek`, `len`, `priority`)
 from Python, including the cross-language call.
@@ -377,17 +389,30 @@ free-threaded interpreters, picks the body:
   module is declared `gil_used = false`, so importing `iheap` keeps the GIL
   disabled.
 
-**Pure-Python fallback, selected at import time.** `iheap._core` imports the
-native extension and falls back to `iheap._pyheap` if it's missing (or if
-`IHEAP_PURE_PYTHON` is set). `_pyheap` is an indexed binary heap with the
-same handle semantics, atomic batches and exception types. A differential
-test drives both cores through the same random operation sequence and
-requires identical results. It exists for interpreters that no native wheel
-fits, chiefly free-threaded CPython 3.13: PyO3 supports free-threading only
-from 3.14, where it is no longer experimental. It ships as a `py3-none-any`
-wheel, derived from a platform wheel by `scripts/make_pure_wheel.py`.
-Installers always prefer a matching native wheel, so it is chosen only where
-nothing native fits.
+**Pure-Python fallback, selected at import time.** `iheap._core` resolves a
+*backend* for numeric priorities. `"auto"` means native if the extension
+imports, else Python. `"native"` raises `ImportError` if the extension is
+unavailable, and `"python"` always uses the pure core. The process-wide
+default comes from `IHEAP_BACKEND` (the older `IHEAP_PURE_PYTHON=1` means
+`python`), and an invalid value fails the import rather than silently picking
+a core. Each queue can override it with `PQDict(..., backend=...)`.
+`_pyheap` is an indexed binary heap with the same handle semantics, argument
+rules, atomic batches, exception types and exact pickling as the native core.
+A differential test drives both cores through the same random operation
+sequence and requires identical results. It exists for interpreters that no
+native wheel fits, chiefly free-threaded CPython 3.13 (PyO3 supports
+free-threading only from 3.14, where it is no longer experimental), PyPy
+and Pyodide. It ships as a `py3-none-any` wheel, derived from a platform
+wheel by `scripts/make_pure_wheel.py`. Installers always prefer a matching
+native wheel, so it is chosen only where nothing native fits.
+
+**Exception safety in the pure cores.** Every sift is *planned* first (all
+comparisons, no writes) and *applied* afterwards (writes, no comparisons). A
+comparison that raises, which is possible with user objects in `ObjectHeap`,
+therefore leaves the heap untouched. Batch operations on `ObjectHeap`
+snapshot and restore the arrays. `ObjectHeap` also detects a comparison that
+calls back into the same heap and raises `RuntimeError` instead of
+deadlocking on its own lock.
 - **`PQDict` is not safe for concurrent mutation.** Each of its operations
   takes several steps across a `dict`, two `list`s and the native heap. Guard
   a shared `PQDict` with a lock.
@@ -403,13 +428,23 @@ reuses the pure-Python heap unchanged:
   the priority objects as they are, and a max-heap wraps them in a two-method
   `_Reversed` object that inverts both comparisons. Objects can't be negated
   the way floats are, so this replaces the float core's sign trick.
-- Comparing incomparable types (`str` with `int`) raises in the middle of a
-  sift, after entries have moved. So before any mutation, every new priority
-  is compared with a reference, the current top or else the first new
-  priority. A mismatch then fails with no effect.
+- Comparing incomparable types (`str` with `int`, or tuples such as
+  `(1, "a")` against `(1, 2)`) raises, and because sifts are planned before
+  they write, it raises before anything has moved.
 
-The choice is explicit, and the default stays numeric on the native core,
-so performance never changes silently. A native string core is feasible:
+**Automatic selection.** With `priority_type="auto"` (the default) a queue
+starts on the numeric core. Each new priority is checked for exactness as a
+`float`, with inline fast paths for `float`, and for `int` below 2⁵³ in
+magnitude. Otherwise the check is `float(p) == p`, which Python evaluates
+exactly for `int`, `Decimal` and `Fraction`. Bulk operations check whole
+batches with C-level `set(map(type, …))`, `min` and `max`. The first priority
+that isn't exact moves the queue to `ObjectHeap`, once, in `O(n)`. All
+priorities are recomputed and handles compacted before anything is replaced,
+so ordering is always exact and never silently rounded.
+`priority_type="float"` skips the check (about 20–50 ns per single update)
+and rejects non-numbers; `"object"` always uses `ObjectHeap`.
+
+A native string core is feasible:
 UTF-8 byte order equals Python's `str` order, including for surrogates. It
 would mean string copies in Rust and a prefix-keyed tournament for an
 estimated 2–4× end to end, so it is left for if string-heavy workloads need
@@ -443,7 +478,15 @@ it.
   block in these docs, and an 8-thread stress test that runs on free-threaded
   CPython in CI.
 - **Both cores:** the whole Python suite also runs against the pure-Python
-  core (`IHEAP_PURE_PYTHON=1`). A differential test drives the native and
+  core (`IHEAP_BACKEND=python`). A differential test drives the native and
   pure cores through the same random operations and requires identical
-  results and exception types. CI installs the `py3-none-any` wheel on
-  CPython 3.13t (Linux, macOS, Windows) and runs the suite there.
+  results, argument rules and exception types. Regression tests cover every
+  finding of the code review: rollback, exception safety with incomparable
+  tuple payloads, re-entrancy, and capacity limits.
+- **Every platform, as shipped.** The Rust core's tests also run on 32-bit
+  (i686, armv7) and big-endian (s390x) targets, plus ppc64le, under
+  emulation. CI installs every built wheel the way pip would choose it and
+  runs the full suite on native runners (Linux x86_64/aarch64, macOS
+  Intel/Apple silicon, Windows x64/x86/arm64; CPython 3.11–3.15, 3.14t,
+  3.15t), under QEMU for i686/armv7/ppc64le/s390x (glibc and musl), and with
+  the pure wheel on CPython 3.13t and PyPy.
