@@ -16,5 +16,5 @@ BLOCK = re.compile(r"^```python\n(.*?)^```", re.MULTILINE | re.DOTALL)
 @pytest.mark.parametrize("page", sorted(DOCS.glob("*.md")), ids=lambda p: p.name)
 def test_code_blocks_run(page):
     namespace: dict = {}
-    for i, block in enumerate(BLOCK.findall(page.read_text())):
+    for i, block in enumerate(BLOCK.findall(page.read_text(encoding="utf-8"))):
         exec(compile(block, f"{page.name}[block {i}]", "exec"), namespace)
