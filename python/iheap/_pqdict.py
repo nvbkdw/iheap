@@ -22,12 +22,17 @@ V = TypeVar("V")
 
 _MISSING: Any = object()
 
+#: Priority function: maps an item's key and value to its priority.
+PriorityFn = Callable[[K, V], float]
+
 
 class PQDict(MutableMapping[K, V], Generic[K, V]):
     """A mapping of keys to values that also behaves as a priority queue.
 
-    The priority of an item is ``key(value)`` if a ``key`` function is given,
-    otherwise the value itself. It must be convertible to ``float`` and not NaN.
+    The priority of an item is ``key(item_key, value)`` if a ``key`` function
+    is given, otherwise the value itself. It must be convertible to ``float``
+    and not NaN. (Unlike ``pqdict``, the function receives the item's key as
+    well as its value.)
     By default the item with the smallest priority is on top; pass
     ``reverse=True`` for a max-queue. Ties are popped in unspecified order.
 
@@ -47,7 +52,8 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
     Args:
         data: Initial items, as a mapping or an iterable of ``(key, value)``
             pairs. Built in ``O(n)`` with a single native call.
-        key: Function mapping a value to its priority. Defaults to identity.
+        key: Function ``(item_key, value) -> priority``. Defaults to using
+            the value itself as the priority.
         reverse: If true, the largest priority is on top (max-queue).
 
     Raises:
@@ -61,6 +67,9 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         'c'
         >>> list(pq.popitems())
         [('c', 5), ('a', 3), ('b', 1)]
+        >>> by_len = PQDict({"pear": 1, "fig": 9}, key=lambda k, v: len(k) + v)
+        >>> by_len.top()
+        'pear'
     """
 
     __slots__ = ("_heap", "_handles", "_keys", "_values", "_keyfn")
@@ -69,7 +78,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         self,
         data: Mapping[K, V] | Iterable[tuple[K, V]] | None = None,
         *,
-        key: Callable[[V], float] | None = None,
+        key: PriorityFn[K, V] | None = None,
         reverse: bool = False,
     ) -> None:
         self._heap = IndexedHeap(reverse=reverse)
@@ -86,7 +95,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         iterable: Iterable[K],
         value: V = None,  # type: ignore[assignment]
         *,
-        key: Callable[[V], float] | None = None,
+        key: PriorityFn[K, V] | None = None,
         reverse: bool = False,
     ) -> PQDict[K, V]:
         """Create a queue with keys from ``iterable``, all set to ``value``.
@@ -100,7 +109,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         return cls(((k, value) for k in iterable), key=key, reverse=reverse)
 
     @property
-    def keyfn(self) -> Callable[[V], float] | None:
+    def keyfn(self) -> PriorityFn[K, V] | None:
         """The priority function, or ``None`` if values are priorities."""
         return self._keyfn
 
@@ -111,8 +120,8 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
 
     # -- internal helpers --------------------------------------------------
 
-    def _priority(self, value: V) -> Any:
-        return value if self._keyfn is None else self._keyfn(value)
+    def _priority(self, key: K, value: V) -> Any:
+        return value if self._keyfn is None else self._keyfn(key, value)
 
     def _bind(self, handle: int, key: K, value: V) -> None:
         if handle == len(self._keys):
@@ -187,7 +196,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
 
     def __setitem__(self, key: K, value: V) -> None:
         keyfn = self._keyfn
-        priority = value if keyfn is None else keyfn(value)
+        priority = value if keyfn is None else keyfn(key, value)
         handle = self._handles.get(key)
         if handle is None:
             handle = self._heap.push(priority)
@@ -230,7 +239,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         old_values: list[V] = []
         old_priorities: list[Any] = []
         for k, v in items.items():
-            priority = self._priority(v)
+            priority = self._priority(k, v)
             handle = self._handles.get(k)
             if handle is None:
                 new_items.append((k, v))
@@ -259,7 +268,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         handles coincide with list positions.
         """
         keys, values = list(items), list(items.values())
-        priorities = values if self._keyfn is None else list(map(self._keyfn, values))
+        priorities = values if self._keyfn is None else list(map(self._keyfn, keys, values))
         self._heap.clear()
         self._heap.push_many(priorities)
         self._handles.update(zip(keys, range(len(keys))))
@@ -414,7 +423,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         """
         if key in self._handles:
             raise KeyError(f"{key!r} is already in the queue")
-        popped = self._heap.push_pop(self._priority(value))
+        popped = self._heap.push_pop(self._priority(key, value))
         if popped is None:
             return key, value
         handle = popped[0]
@@ -423,24 +432,40 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         return old
 
     def replace_key(self, key: K, new_key: K) -> None:
-        """Rename ``key`` to ``new_key``, keeping its value and priority.
+        """Rename ``key`` to ``new_key``, keeping its value.
+
+        Without a ``key`` function the priority is unchanged (``O(1)``);
+        with one, it is recomputed as ``key(new_key, value)``.
 
         Raises:
             KeyError: ``key`` is missing or ``new_key`` is already present.
         """
         if new_key in self._handles:
             raise KeyError(f"{new_key!r} is already in the queue")
-        handle = self._handles.pop(key)
+        handle = self._handles[key]
+        if self._keyfn is not None:
+            # The native update validates before mutating: atomic.
+            self._heap.update(handle, self._keyfn(new_key, self._values[handle]))
+        del self._handles[key]
         self._handles[new_key] = handle
         self._keys[handle] = new_key
 
     def swap_priority(self, key1: K, key2: K) -> None:
-        """Exchange the values (and hence priorities) of two items in ``O(1)``.
+        """Exchange the values of two items, and hence their priorities.
+
+        Without a ``key`` function this is ``O(1)``; with one, both
+        priorities are recomputed from the new ``(key, value)`` pairs.
 
         Raises:
             KeyError: Either key is missing.
         """
         h1, h2 = self._handles[key1], self._handles[key2]
+        if self._keyfn is not None:
+            # key1 takes over h2 (and its value), key2 takes over h1. The
+            # native batch update validates before mutating: atomic.
+            p1 = self._keyfn(key1, self._values[h2])
+            p2 = self._keyfn(key2, self._values[h1])
+            self._heap.update_many([h2, h1], [p1, p2])
         self._handles[key1], self._handles[key2] = h2, h1
         self._keys[h1], self._keys[h2] = key2, key1
 
@@ -474,16 +499,18 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         """
         if key is not _MISSING:
             handle = self._handles[key]
-            self._heap.update(handle, self._priority(self._values[handle]))
+            self._heap.update(handle, self._priority(key, self._values[handle]))
             return
         handles = list(self._handles.values())
-        self._heap.update_many(handles, [self._priority(self._values[h]) for h in handles])
+        self._heap.update_many(
+            handles, [self._priority(self._keys[h], self._values[h]) for h in handles]
+        )
 
 
 def _rebuild(
     cls: type[PQDict[Any, Any]],
     items: list[tuple[Any, Any]],
-    keyfn: Callable[[Any], float] | None,
+    keyfn: PriorityFn[Any, Any] | None,
     reverse: bool,
 ) -> PQDict[Any, Any]:
     return cls(items, key=keyfn, reverse=reverse)
@@ -509,9 +536,9 @@ def maxpq(*args: Any, **kwargs: Any) -> PQDict[Any, Any]:
     return PQDict(dict(*args, **kwargs), reverse=True)
 
 
-def _select(n: int, mapping: Mapping[K, Any], key: Callable[[Any], float] | None, reverse: bool) -> list[K]:
+def _select(n: int, mapping: Mapping[K, V], key: PriorityFn[K, V] | None, reverse: bool) -> list[K]:
     keys = list(mapping)
-    values = mapping.values() if key is None else map(key, mapping.values())
+    values = mapping.values() if key is None else map(key, keys, mapping.values())
     heap = IndexedHeap(reverse=reverse, capacity=len(keys))
     by_handle: list[Any] = [None] * len(keys)
     for k, handle in zip(keys, heap.push_many(list(values))):
@@ -519,7 +546,7 @@ def _select(n: int, mapping: Mapping[K, Any], key: Callable[[Any], float] | None
     return [by_handle[handle] for handle, _ in heap.pop_many(n)]
 
 
-def nsmallest(n: int, mapping: Mapping[K, Any], key: Callable[[Any], float] | None = None) -> list[K]:
+def nsmallest(n: int, mapping: Mapping[K, V], key: PriorityFn[K, V] | None = None) -> list[K]:
     """Return the keys of the ``n`` items with the smallest priorities.
 
     Runs in ``O(N + n log N)`` in native code.
@@ -527,7 +554,7 @@ def nsmallest(n: int, mapping: Mapping[K, Any], key: Callable[[Any], float] | No
     Args:
         n: Number of keys to return.
         mapping: Any mapping of keys to values.
-        key: Priority function applied to values. Defaults to identity.
+        key: Function ``(item_key, value) -> priority``. Defaults to the value.
 
     Returns:
         Up to ``n`` keys, smallest priority first.
@@ -535,13 +562,13 @@ def nsmallest(n: int, mapping: Mapping[K, Any], key: Callable[[Any], float] | No
     return _select(n, mapping, key, reverse=False)
 
 
-def nlargest(n: int, mapping: Mapping[K, Any], key: Callable[[Any], float] | None = None) -> list[K]:
+def nlargest(n: int, mapping: Mapping[K, V], key: PriorityFn[K, V] | None = None) -> list[K]:
     """Return the keys of the ``n`` items with the largest priorities.
 
     Args:
         n: Number of keys to return.
         mapping: Any mapping of keys to values.
-        key: Priority function applied to values. Defaults to identity.
+        key: Function ``(item_key, value) -> priority``. Defaults to the value.
 
     Returns:
         Up to ``n`` keys, largest priority first.

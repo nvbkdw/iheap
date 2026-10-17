@@ -322,7 +322,7 @@ native heap:
 ```text
 _handles : dict[key, handle]      key lookup, and insertion order for iteration
 _keys    : list, index = handle   reverse lookup when a pop returns a handle
-_values  : list, index = handle   the payload; priority = key(value) or value
+_values  : list, index = handle   the payload; priority = key(k, value) or value
 ```
 
 - **Hot paths are inlined.** `__setitem__`, `__delitem__` and `popitem` don't

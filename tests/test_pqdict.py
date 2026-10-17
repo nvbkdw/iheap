@@ -31,7 +31,7 @@ def test_priority_order_and_reverse():
 
 
 def test_key_function_keeps_original_values():
-    pq = PQDict({"x": (3, "p"), "y": (1, "q")}, key=lambda v: v[0])
+    pq = PQDict({"x": (3, "p"), "y": (1, "q")}, key=lambda k, v: v[0])
     assert pq.keyfn is not None
     assert pq.popitem() == ("y", (1, "q"))
     assert pq.topvalue() == (3, "p")
@@ -87,7 +87,7 @@ def test_replace_key_and_swap_priority():
 
 
 def test_heapify_after_in_place_mutation():
-    pq = PQDict({"a": [3], "b": [2], "c": [1]}, key=lambda v: v[0])
+    pq = PQDict({"a": [3], "b": [2], "c": [1]}, key=lambda k, v: v[0])
     pq["c"][0] = 10
     pq.heapify("c")
     assert pq.top() == "b"
@@ -146,7 +146,7 @@ def test_payload_references_are_released():
 
     obj = Payload()
     ref = weakref.ref(obj)
-    pq = PQDict({"k": obj}, key=lambda _: 0)
+    pq = PQDict({"k": obj}, key=lambda k, v: 0)
     pq.pop()
     del obj
     assert ref() is None
@@ -156,7 +156,7 @@ def test_nsmallest_nlargest():
     data = {k: (k * 37) % 101 for k in range(50)}
     assert nsmallest(5, data) == sorted(data, key=data.get)[:5]
     assert nlargest(5, data) == sorted(data, key=data.get, reverse=True)[:5]
-    assert nsmallest(2, data, key=lambda v: -v) == nlargest(2, data)
+    assert nsmallest(2, data, key=lambda k, v: -v) == nlargest(2, data)
     assert nsmallest(100, {}) == []
 
 
@@ -198,7 +198,7 @@ def test_dict_operations():
     assert pq == dict(pq) and dict(pq) == pq and pq != {"a": 3}
     assert set(pq.keys()) & {"a", "q"} == {"a"}
     assert ("b", 1) in pq.items() and 2 in pq.values()
-    assert PQDict.fromkeys("xy", key=lambda v: 0)["x"] is None
+    assert PQDict.fromkeys("xy", key=lambda k, v: 0)["x"] is None
     with pytest.raises(TypeError):
         hash(pq)
 
@@ -236,3 +236,48 @@ def test_random_parity_with_dict():
         assert len(pq) == len(d) and pq == d
         if d:
             assert pq.topvalue() == min(d.values())
+
+
+def test_priority_from_key_and_value():
+    # priority = item key's length + value
+    fn = lambda k, v: len(k) + v  # noqa: E731
+    pq = PQDict({"apple": 0, "fig": 1, "kiwi": 5}, key=fn)
+    assert list(PQDict(pq, key=fn).popkeys()) == ["fig", "apple", "kiwi"]
+    pq["be"] = 0
+    assert pq.top() == "be"
+    assert pq.pushpopitem("a", 0) == ("a", 0)  # 1 + 0 beats len("be") = 2
+    pq.update({"zz": -5, "fig": 100})
+    assert list(pq.popkeys()) == ["zz", "be", "apple", "kiwi", "fig"]
+
+
+def test_replace_key_and_swap_recompute_key_dependent_priorities():
+    fn = lambda k, v: len(k) * v  # noqa: E731 - priority = len(key) * value
+    pq = PQDict({"aaa": 1, "b": 2}, key=fn)  # priorities: aaa 3, b 2
+    assert pq.top() == "b"
+    pq.replace_key("aaa", "a")  # a: 1 * 1 = 1
+    assert pq.top() == "a" and pq == {"a": 1, "b": 2}
+    pq["cccc"] = 3  # 12
+    pq.swap_priority("a", "cccc")  # a: 1 * 3 = 3, cccc: 4 * 1 = 4
+    assert pq == {"a": 3, "b": 2, "cccc": 1}
+    assert list(pq.popitems()) == [("b", 2), ("a", 3), ("cccc", 1)]
+
+
+def test_key_dependent_operations_are_atomic():
+    # NaN exactly for key "bad" holding value 2.
+    fn = lambda k, v: math.nan if (k, v) == ("bad", 2) else v  # noqa: E731
+    pq = PQDict({"a": 2, "b": 3}, key=fn)
+    with pytest.raises(ValueError):
+        pq.replace_key("a", "bad")
+    with pytest.raises(ValueError):
+        pq["bad"] = 2
+    assert pq == {"a": 2, "b": 3} and pq.top() == "a"
+    pq2 = PQDict({"bad": 1, "x": 2}, key=fn)
+    with pytest.raises(ValueError):
+        pq2.swap_priority("bad", "x")  # "bad" would take value 2
+    assert pq2 == {"bad": 1, "x": 2} and list(pq2.popkeys()) == ["bad", "x"]
+
+
+def test_nsmallest_nlargest_see_keys():
+    data = {"a": 5, "bb": 5, "ccc": 5}
+    assert nsmallest(1, data, key=lambda k, v: len(k)) == ["a"]
+    assert nlargest(1, data, key=lambda k, v: len(k)) == ["ccc"]

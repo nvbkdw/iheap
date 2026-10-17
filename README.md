@@ -83,7 +83,7 @@ values (the payload) never leave Python.
 ### `PQDict(data=None, *, key=None, reverse=False)`
 
 A `MutableMapping` whose items are ordered by priority. The priority is
-`key(value)` if a `key` function is given, otherwise the value itself.
+`key(item_key, value)` if a `key` function is given, otherwise the value itself.
 `reverse=True` makes it a max-queue. Ties are popped in unspecified order.
 
 `PQDict` supports **every `dict` operation**: `pq[k]`, `pq[k] = v`,
@@ -110,8 +110,12 @@ inserted.
 Module functions: `minpq(**kw)`, `maxpq(**kw)`, `nsmallest(n, mapping, key=None)`,
 `nlargest(n, mapping, key=None)`.
 
-Differences from `pqdict`: priorities must be real numbers, and the custom
-comparator `precedes=` is replaced by `reverse=`.
+Differences from `pqdict`:
+
+- priorities must be real numbers;
+- the custom comparator `precedes=` is replaced by `reverse=`;
+- the `key` function receives the item's key as well as its value,
+  `key(item_key, value)`. To port `key=f`, write `key=lambda k, v: f(v)`.
 
 ### `IndexedHeap(*, reverse=False, capacity=0)`
 

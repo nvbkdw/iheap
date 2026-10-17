@@ -78,18 +78,37 @@ assert minpq(x=1, y=2).top() == "x"
 
 ## Custom priorities
 
-Use `key=` when the priority comes from part of the value, as with
-`sorted(key=...)`. The value is stored unchanged; only `key(value)` is sent to
-the native heap.
+Pass `key=` to compute an item's priority from its **key and value**. The
+function is called as `key(item_key, value)`. The value is stored unchanged;
+only the returned priority is sent to the native heap.
 
 ```python
-tasks = PQDict(key=lambda task: task["deadline"])
+tasks = PQDict(key=lambda name, task: task["deadline"])
 tasks["deploy"] = {"deadline": 17.5, "owner": "ops"}
 tasks["review"] = {"deadline": 9.0, "owner": "dev"}
 
-key, task = tasks.popitem()
-assert key == "review" and task["owner"] == "dev"
+name, task = tasks.popitem()
+assert name == "review" and task["owner"] == "dev"
 ```
+
+The key can take part in the priority too, for example to break ties or to
+weight items:
+
+```python
+# Shorter names first among equal deadlines.
+jobs = PQDict(key=lambda name, deadline: deadline + len(name) / 1000)
+jobs.update({"backup": 3.0, "db": 3.0, "etl": 1.0})
+assert list(jobs.popkeys()) == ["etl", "db", "backup"]
+```
+
+!!! note "Difference from `pqdict`"
+    `pqdict`'s key function receives only the value. To port such code,
+    change `key=f` to `key=lambda k, v: f(v)`. When a key function is set,
+    [`replace_key`][iheap.PQDict.replace_key] and
+    [`swap_priority`][iheap.PQDict.swap_priority] recompute the affected
+    priorities, because the key is an input. The same `(key, value)` function
+    form is used by [`nsmallest`][iheap.nsmallest] and
+    [`nlargest`][iheap.nlargest].
 
 If you change a value **in place** in a way that changes its priority, tell the
 queue with [`heapify`][iheap.PQDict.heapify]:
