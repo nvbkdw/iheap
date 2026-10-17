@@ -31,8 +31,11 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
     By default the item with the smallest priority is on top; pass
     ``reverse=True`` for a max-queue. Ties are popped in unspecified order.
 
-    Iteration (``for k in pq``, ``keys()``, ``items()``) is in arbitrary order;
-    use :meth:`popkeys`, :meth:`popitems` etc. for priority order.
+    Supports every ``dict`` operation (``get``, ``setdefault``, ``|``, ``|=``,
+    ``reversed``, views, equality, ...). Like ``dict``, iteration follows key
+    insertion order; use :meth:`popkeys`, :meth:`popitems` etc. for priority
+    order. Unlike ``dict``, :meth:`popitem` removes the top-priority item
+    rather than the last inserted one.
     """
 
     __slots__ = ("_heap", "_handles", "_keys", "_values", "_keyfn")
@@ -56,7 +59,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
     def fromkeys(
         cls,
         iterable: Iterable[K],
-        value: V,
+        value: V = None,  # type: ignore[assignment]
         *,
         key: Callable[[V], float] | None = None,
         reverse: bool = False,
@@ -109,6 +112,38 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
 
     def __getitem__(self, key: K) -> V:
         return self._values[self._handles[key]]
+
+    def __reversed__(self) -> Iterator[K]:
+        return reversed(self._handles)
+
+    def get(self, key: K, default: Any = None) -> Any:
+        handle = self._handles.get(key)
+        return default if handle is None else self._values[handle]
+
+    def setdefault(self, key: K, default: Any = None) -> Any:
+        handle = self._handles.get(key)
+        if handle is not None:
+            return self._values[handle]
+        self[key] = default
+        return default
+
+    def __or__(self, other: Any) -> PQDict[K, V]:
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        new = self.copy()
+        new.update(other)
+        return new
+
+    def __ror__(self, other: Any) -> PQDict[K, V]:
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        new = type(self)(other, key=self._keyfn, reverse=self.reverse)
+        new.update(self)
+        return new
+
+    def __ior__(self, other: Any) -> PQDict[K, V]:
+        self.update(other)
+        return self
 
     # The hot paths below inline ``_priority``/``_bind``/``_unbind``: a Python
     # call frame costs more than the native heap operation itself.
@@ -185,7 +220,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         priorities = values if self._keyfn is None else list(map(self._keyfn, values))
         self._heap.clear()
         self._heap.push_many(priorities)
-        self._handles = dict(zip(keys, range(len(keys))))
+        self._handles.update(zip(keys, range(len(keys))))
         self._keys, self._values = keys, values
 
     def clear(self) -> None:

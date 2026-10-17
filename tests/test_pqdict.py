@@ -177,3 +177,62 @@ def test_matches_pqdict_reference():
         if ref:
             assert ours.topitem() == ref.topitem()
     assert dict(ours) == dict(ref)
+
+
+def test_dict_operations():
+    pq = minpq(a=3, b=1)
+    assert pq.get("a") == 3 and pq.get("z") is None and pq.get("z", 0) == 0
+    assert pq.setdefault("a", 9) == 3 and pq.setdefault("c", 2) == 2 and pq["c"] == 2
+    assert list(reversed(pq)) == ["c", "b", "a"]
+    merged = pq | {"a": 0, "d": 5}
+    assert isinstance(merged, PQDict) and merged.top() == "a" and pq["a"] == 3
+    rmerged = {"a": 7, "z": -1} | pq
+    assert isinstance(rmerged, PQDict) and rmerged == {"a": 3, "z": -1, "b": 1, "c": 2}
+    assert list(rmerged) == ["a", "z", "b", "c"]
+    same = pq
+    pq |= [("e", -5)]
+    assert pq is same and pq.top() == "e"
+    with pytest.raises(TypeError):
+        pq | [("x", 1)]
+    assert dict(pq) == {"a": 3, "b": 1, "c": 2, "e": -5}
+    assert pq == dict(pq) and dict(pq) == pq and pq != {"a": 3}
+    assert set(pq.keys()) & {"a", "q"} == {"a"}
+    assert ("b", 1) in pq.items() and 2 in pq.values()
+    assert PQDict.fromkeys("xy", key=lambda v: 0)["x"] is None
+    with pytest.raises(TypeError):
+        hash(pq)
+
+
+def test_random_parity_with_dict():
+    """Every dict operation, including iteration order, must match ``dict``."""
+    rng = random.Random(7)
+    d, pq = {}, PQDict()
+    for _ in range(3000):
+        k, v = rng.randrange(30), rng.randrange(-50, 50)
+        op = rng.randrange(9)
+        if op <= 2:
+            d[k] = v
+            pq[k] = v
+        elif op == 3:
+            assert pq.pop(k, None) == d.pop(k, None)
+        elif op == 4:
+            assert pq.setdefault(k, v) == d.setdefault(k, v)
+        elif op == 5:
+            assert pq.get(k) == d.get(k)
+        elif op == 6:
+            extra = {rng.randrange(30): rng.randrange(50) for _ in range(3)}
+            d.update(extra)
+            pq.update(extra)
+        elif op == 7:
+            extra = {rng.randrange(30): rng.randrange(50) for _ in range(3)}
+            d |= extra
+            pq |= extra
+        elif op == 8 and k in d:
+            del d[k]
+            del pq[k]
+        assert list(pq) == list(d)
+        assert list(pq.items()) == list(d.items())
+        assert list(reversed(pq)) == list(reversed(d))
+        assert len(pq) == len(d) and pq == d
+        if d:
+            assert pq.topvalue() == min(d.values())

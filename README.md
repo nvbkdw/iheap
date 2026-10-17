@@ -63,6 +63,14 @@ A `MutableMapping` whose items are ordered by priority. The priority is
 `key(value)` if a `key` function is given, otherwise the value itself.
 `reverse=True` makes it a max-queue. Ties are popped in unspecified order.
 
+`PQDict` supports **every `dict` operation**: `pq[k]`, `pq[k] = v`,
+`del pq[k]`, `k in pq`, `len`, `iter`, `reversed`, `get`, `setdefault`,
+`pop(k[, default])`, `update`, `|`, `|=`, `keys`/`values`/`items` views,
+`clear`, `copy`, `fromkeys`, equality with any mapping, and pickling. As with
+`dict`, iteration follows **insertion order**. The one intended difference is
+`popitem()`, which removes the **top-priority** item instead of the last one
+inserted.
+
 | Method | Description |
 |---|---|
 | `pq[k] = v`, `del pq[k]`, `pq[k]`, `k in pq`, `len(pq)` | mapping protocol; inserts, updates and deletes are `O(log n)` |

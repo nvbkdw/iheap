@@ -36,6 +36,7 @@ jobs:
         run: |
           python -m venv .venv
           source .venv/bin/activate 2>/dev/null || source .venv/Scripts/activate
+          python -m pip install -U pip  # maturin develop uses `pip install --group` (pip >= 25.1)
           pip install maturin pytest pqdict
           maturin develop --release
           pytest -q
