@@ -2,6 +2,8 @@
 
 * :class:`IndexedHeap` -- low-level heap of float priorities addressed by
   integer handles. Holds no Python objects.
+* :class:`ObjectHeap` -- the same, for any comparable priorities (strings,
+  tuples, ...), in pure Python.
 * :class:`PQDict` -- ``pqdict``-style mapping of keys to values ordered by
   priority. Keys and values live in Python; only priorities reach the core.
 
@@ -14,9 +16,19 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _version
 
 from ._core import NATIVE, IndexedHeap
+from ._objheap import ObjectHeap
 from ._pqdict import PQDict, maxpq, minpq, nlargest, nsmallest
 
-__all__ = ["NATIVE", "IndexedHeap", "PQDict", "maxpq", "minpq", "nlargest", "nsmallest"]
+__all__ = [
+    "NATIVE",
+    "IndexedHeap",
+    "ObjectHeap",
+    "PQDict",
+    "maxpq",
+    "minpq",
+    "nlargest",
+    "nsmallest",
+]
 
 try:
     __version__ = _version("iheap")

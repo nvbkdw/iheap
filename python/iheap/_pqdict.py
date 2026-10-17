@@ -13,9 +13,10 @@ the peak queue size.
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, MutableMapping
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from ._core import IndexedHeap
+from ._objheap import ObjectHeap
 
 K = TypeVar("K", bound=Hashable)
 V = TypeVar("V")
@@ -23,16 +24,32 @@ V = TypeVar("V")
 _MISSING: Any = object()
 
 #: Priority function: maps an item's key and value to its priority.
-PriorityFn = Callable[[K, V], float]
+PriorityFn = Callable[[K, V], object]
+
+#: ``"float"``: numeric priorities on the native core. ``"object"``: any
+#: mutually comparable priorities (str, tuple, ...) on the generic core.
+PriorityType = Literal["float", "object"]
+
+
+def _new_heap(priority_type: PriorityType, reverse: bool, capacity: int = 0) -> Any:
+    if priority_type == "float":
+        return IndexedHeap(reverse=reverse, capacity=capacity)
+    if priority_type == "object":
+        return ObjectHeap(reverse=reverse)
+    raise ValueError(f"priority_type must be 'float' or 'object', not {priority_type!r}")
 
 
 class PQDict(MutableMapping[K, V], Generic[K, V]):
     """A mapping of keys to values that also behaves as a priority queue.
 
     The priority of an item is ``key(item_key, value)`` if a ``key`` function
-    is given, otherwise the value itself. It must be convertible to ``float``
-    and not NaN. (Unlike ``pqdict``, the function receives the item's key as
-    well as its value.)
+    is given, otherwise the value itself. (Unlike ``pqdict``, the function
+    receives the item's key as well as its value.) With the default
+    ``priority_type="float"``, priorities must be numbers (anything ``float``
+    accepts except ``str``) and run on the fast native core. With
+    ``priority_type="object"``, they may be any mutually comparable objects,
+    such as strings, tuples or dates, ordered with ``<`` at pure-Python speed.
+    NaN is rejected either way.
     By default the item with the smallest priority is on top; pass
     ``reverse=True`` for a max-queue. Ties are popped in unspecified order.
 
@@ -55,10 +72,13 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         key: Function ``(item_key, value) -> priority``. Defaults to using
             the value itself as the priority.
         reverse: If true, the largest priority is on top (max-queue).
+        priority_type: ``"float"`` (default) for numeric priorities on the
+            native core, or ``"object"`` for any comparable priorities.
 
     Raises:
-        TypeError: A priority is not convertible to ``float``.
-        ValueError: A priority is NaN.
+        TypeError: A priority is not a number (``"float"``), or cannot be
+            compared with the others (``"object"``).
+        ValueError: A priority is NaN, or ``priority_type`` is unknown.
 
     Examples:
         >>> pq = PQDict({"a": 3, "b": 1}, reverse=True)
@@ -70,9 +90,12 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         >>> by_len = PQDict({"pear": 1, "fig": 9}, key=lambda k, v: len(k) + v)
         >>> by_len.top()
         'pear'
+        >>> words = PQDict({"x": "pear", "y": "apple"}, priority_type="object")
+        >>> words.popitem()
+        ('y', 'apple')
     """
 
-    __slots__ = ("_heap", "_handles", "_keys", "_values", "_keyfn")
+    __slots__ = ("_heap", "_handles", "_keys", "_values", "_keyfn", "_priority_type")
 
     def __init__(
         self,
@@ -80,8 +103,10 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         *,
         key: PriorityFn[K, V] | None = None,
         reverse: bool = False,
+        priority_type: PriorityType = "float",
     ) -> None:
-        self._heap = IndexedHeap(reverse=reverse)
+        self._heap = _new_heap(priority_type, reverse)
+        self._priority_type = priority_type
         self._handles: dict[K, int] = {}
         self._keys: list[Any] = []
         self._values: list[Any] = []
@@ -97,6 +122,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         *,
         key: PriorityFn[K, V] | None = None,
         reverse: bool = False,
+        priority_type: PriorityType = "float",
     ) -> PQDict[K, V]:
         """Create a queue with keys from ``iterable``, all set to ``value``.
 
@@ -105,8 +131,11 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
             value: Value (and, without ``key``, priority) shared by every key.
             key: Priority function, as in the constructor.
             reverse: Max-queue if true, as in the constructor.
+            priority_type: As in the constructor.
         """
-        return cls(((k, value) for k in iterable), key=key, reverse=reverse)
+        return cls(
+            ((k, value) for k in iterable), key=key, reverse=reverse, priority_type=priority_type
+        )
 
     @property
     def keyfn(self) -> PriorityFn[K, V] | None:
@@ -117,6 +146,11 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
     def reverse(self) -> bool:
         """``True`` for a max-queue."""
         return self._heap.reverse
+
+    @property
+    def priority_type(self) -> PriorityType:
+        """``"float"`` (native core) or ``"object"`` (generic core)."""
+        return self._priority_type
 
     # -- internal helpers --------------------------------------------------
 
@@ -183,7 +217,9 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
     def __ror__(self, other: Any) -> PQDict[K, V]:
         if not isinstance(other, Mapping):
             return NotImplemented
-        new = type(self)(other, key=self._keyfn, reverse=self.reverse)
+        new = type(self)(
+            other, key=self._keyfn, reverse=self.reverse, priority_type=self._priority_type
+        )
         new.update(self)
         return new
 
@@ -289,17 +325,22 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         new._keys = self._keys.copy()
         new._values = self._values.copy()
         new._keyfn = self._keyfn
+        new._priority_type = self._priority_type
         return new
 
     __copy__ = copy
 
     def __reduce__(self) -> tuple[Any, ...]:
-        return (_rebuild, (type(self), list(self.items()), self._keyfn, self.reverse))
+        return (
+            _rebuild,
+            (type(self), list(self.items()), self._keyfn, self.reverse, self._priority_type),
+        )
 
     def __repr__(self) -> str:
         items = ", ".join(f"{k!r}: {v!r}" for k, v in self.items())
         extra = "" if self._keyfn is None else f", key={self._keyfn!r}"
         extra += ", reverse=True" if self.reverse else ""
+        extra += ", priority_type='object'" if self._priority_type == "object" else ""
         return f"{type(self).__name__}({{{items}}}{extra})"
 
     # -- priority queue API ------------------------------------------------
@@ -512,8 +553,9 @@ def _rebuild(
     items: list[tuple[Any, Any]],
     keyfn: PriorityFn[Any, Any] | None,
     reverse: bool,
+    priority_type: PriorityType = "float",
 ) -> PQDict[Any, Any]:
-    return cls(items, key=keyfn, reverse=reverse)
+    return cls(items, key=keyfn, reverse=reverse, priority_type=priority_type)
 
 
 def minpq(*args: Any, **kwargs: Any) -> PQDict[Any, Any]:
@@ -536,17 +578,28 @@ def maxpq(*args: Any, **kwargs: Any) -> PQDict[Any, Any]:
     return PQDict(dict(*args, **kwargs), reverse=True)
 
 
-def _select(n: int, mapping: Mapping[K, V], key: PriorityFn[K, V] | None, reverse: bool) -> list[K]:
+def _select(
+    n: int,
+    mapping: Mapping[K, V],
+    key: PriorityFn[K, V] | None,
+    reverse: bool,
+    priority_type: PriorityType,
+) -> list[K]:
     keys = list(mapping)
     values = mapping.values() if key is None else map(key, keys, mapping.values())
-    heap = IndexedHeap(reverse=reverse, capacity=len(keys))
+    heap = _new_heap(priority_type, reverse, capacity=len(keys))
     by_handle: list[Any] = [None] * len(keys)
     for k, handle in zip(keys, heap.push_many(list(values))):
         by_handle[handle] = k
     return [by_handle[handle] for handle, _ in heap.pop_many(n)]
 
 
-def nsmallest(n: int, mapping: Mapping[K, V], key: PriorityFn[K, V] | None = None) -> list[K]:
+def nsmallest(
+    n: int,
+    mapping: Mapping[K, V],
+    key: PriorityFn[K, V] | None = None,
+    priority_type: PriorityType = "float",
+) -> list[K]:
     """Return the keys of the ``n`` items with the smallest priorities.
 
     Runs in ``O(N + n log N)`` in native code.
@@ -555,22 +608,31 @@ def nsmallest(n: int, mapping: Mapping[K, V], key: PriorityFn[K, V] | None = Non
         n: Number of keys to return.
         mapping: Any mapping of keys to values.
         key: Function ``(item_key, value) -> priority``. Defaults to the value.
+        priority_type: ``"float"`` (native core) or ``"object"`` (any
+            comparable priorities), as in [`PQDict`][iheap.PQDict].
 
     Returns:
         Up to ``n`` keys, smallest priority first.
     """
-    return _select(n, mapping, key, reverse=False)
+    return _select(n, mapping, key, reverse=False, priority_type=priority_type)
 
 
-def nlargest(n: int, mapping: Mapping[K, V], key: PriorityFn[K, V] | None = None) -> list[K]:
+def nlargest(
+    n: int,
+    mapping: Mapping[K, V],
+    key: PriorityFn[K, V] | None = None,
+    priority_type: PriorityType = "float",
+) -> list[K]:
     """Return the keys of the ``n`` items with the largest priorities.
 
     Args:
         n: Number of keys to return.
         mapping: Any mapping of keys to values.
         key: Function ``(item_key, value) -> priority``. Defaults to the value.
+        priority_type: ``"float"`` (native core) or ``"object"`` (any
+            comparable priorities), as in [`PQDict`][iheap.PQDict].
 
     Returns:
         Up to ``n`` keys, largest priority first.
     """
-    return _select(n, mapping, key, reverse=True)
+    return _select(n, mapping, key, reverse=True, priority_type=priority_type)

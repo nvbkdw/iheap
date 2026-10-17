@@ -119,6 +119,36 @@ tasks.heapify("deploy")             # re-prioritize one item in O(log n)
 tasks.heapify()                     # ... or every item in O(n)
 ```
 
+## String and other priorities
+
+By default, priorities are numbers and run on the fast Rust core. For
+priorities of any other type that supports `<` (strings, tuples, dates,
+exact `Decimal`s, big integers beyond float precision), pass
+`priority_type="object"`:
+
+```python
+from datetime import date
+
+words = PQDict({"x": "pear", "y": "apple", "z": "fig"}, priority_type="object")
+assert list(words.popkeys()) == ["y", "z", "x"]
+
+due = PQDict(priority_type="object", reverse=True)    # latest date first
+due.update({"tax": date(2026, 4, 15), "rent": date(2026, 11, 1)})
+assert due.top() == "rent"
+
+# Tuples make ties deterministic: equal priority -> smaller sequence number first.
+fifo = PQDict(priority_type="object", key=lambda name, item: (item[0], item[1]))
+fifo.update({"b": (1, 0), "a": (1, 1), "c": (0, 2)})
+assert list(fifo.popkeys()) == ["c", "b", "a"]
+```
+
+Object priorities use a pure-Python core, the same one that
+[`ObjectHeap`][iheap.ObjectHeap] exposes directly, so they run at
+pure-Python speed: about the same as `pqdict`. Keep numeric priorities on the
+default `"float"` type when you can. Priorities in one queue must be
+comparable with each other. A priority that isn't (say, an `int` in a queue
+of strings) raises `TypeError` and leaves the queue unchanged.
+
 ## It is a full `dict`
 
 Every `dict` operation works, and iteration follows **insertion order**,

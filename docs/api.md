@@ -21,3 +21,7 @@ do for `dict` and are not repeated here.
 ::: iheap.nlargest
 
 ::: iheap.IndexedHeap
+
+::: iheap.ObjectHeap
+    options:
+      members: false

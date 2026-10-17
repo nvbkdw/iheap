@@ -37,13 +37,22 @@ class IndexedHeap:
         self._pos: list[int] = []
         self._free: list[int] = []
 
-    def _key(self, priority: Any) -> float:
+    # Subclasses may override `_key`/`_decode` (priority <-> stored key) and
+    # `_check` (validates new keys against the heap before any mutation).
+
+    def _key(self, priority: Any) -> Any:
         if isinstance(priority, (str, bytes, bytearray)):
             raise TypeError(f"must be real number, not {type(priority).__name__}")
         value = float(priority)
         if value != value:
             raise ValueError(_NAN_MESSAGE)
         return value * self._sign
+
+    def _decode(self, key: Any) -> Any:
+        return key * self._sign
+
+    def _check(self, keys: list[Any]) -> None:
+        """Called with the lock held, before mutating, with all new keys."""
 
     def _live(self, handle: int) -> float:
         keys = self._keys
@@ -137,7 +146,7 @@ class IndexedHeap:
             heap[0] = last
             self._sift_down(0)
         self._release(top)
-        return top, key * self._sign  # type: ignore[operator]
+        return top, self._decode(key)
 
     @staticmethod
     def _prefer_rebuild(k: int, n: int) -> bool:
@@ -168,6 +177,7 @@ class IndexedHeap:
     def push(self, priority: float) -> int:
         key = self._key(priority)
         with self._lock:
+            self._check([key])
             handle = self._allocate(key)
             self._sift_up(len(self._heap) - 1)
             return handle
@@ -175,6 +185,7 @@ class IndexedHeap:
     def push_many(self, priorities: list[float]) -> list[int]:
         keys = [self._key(p) for p in priorities]  # validate all first: atomic
         with self._lock:
+            self._check(keys)
             rebuild = self._prefer_rebuild(len(keys), len(self._heap) + len(keys))
             handles = []
             for key in keys:
@@ -190,7 +201,7 @@ class IndexedHeap:
             if not self._heap:
                 return None
             top = self._heap[0]
-            return top, self._keys[top] * self._sign  # type: ignore[operator]
+            return top, self._decode(self._keys[top])
 
     def pop(self) -> tuple[int, float]:
         with self._lock:
@@ -206,7 +217,7 @@ class IndexedHeap:
             old = keys[top]
             keys[top] = key
             self._sift_down(0)
-            return top, old * self._sign  # type: ignore[operator]
+            return top, self._decode(old)
 
     def pop_many(self, n: int) -> list[tuple[int, float]]:
         with self._lock:
@@ -214,15 +225,16 @@ class IndexedHeap:
 
     def priority(self, handle: int) -> float:
         with self._lock:
-            return self._live(handle) * self._sign
+            return self._decode(self._live(handle))
 
     def update(self, handle: int, priority: float) -> float:
         key = self._key(priority)
         with self._lock:
             old = self._live(handle)
+            self._check([key])
             self._keys[handle] = key
             self._fix(self._pos[handle])
-            return old * self._sign
+            return self._decode(old)
 
     def update_many(self, handles: list[int], priorities: list[float]) -> None:
         handles, priorities = list(handles), list(priorities)
@@ -232,6 +244,7 @@ class IndexedHeap:
         with self._lock:
             for handle in handles:  # validate all first: atomic
                 self._live(handle)
+            self._check(keys)
             if self._prefer_rebuild(len(keys), len(self._heap)):
                 for handle, key in zip(handles, keys):
                     self._keys[handle] = key
@@ -252,7 +265,7 @@ class IndexedHeap:
                 self._pos[last] = index
                 self._fix(index)
             self._release(handle)
-            return key * self._sign
+            return self._decode(key)
 
     def clear(self) -> None:
         with self._lock:
@@ -260,11 +273,11 @@ class IndexedHeap:
 
     def items(self) -> list[tuple[int, float]]:
         with self._lock:
-            sign = self._sign
-            return [(h, k * sign) for h, k in enumerate(self._keys) if k is not None]
+            decode = self._decode
+            return [(h, decode(k)) for h, k in enumerate(self._keys) if k is not None]
 
     def copy(self) -> IndexedHeap:
-        new = IndexedHeap(reverse=self.reverse)
+        new = type(self)(reverse=self.reverse)
         with self._lock:
             new._heap = self._heap.copy()
             new._keys = self._keys.copy()
@@ -278,4 +291,4 @@ class IndexedHeap:
         return self.copy()
 
     def __repr__(self) -> str:
-        return f"IndexedHeap(len={len(self._heap)}, reverse={self.reverse})"
+        return f"{type(self).__name__}(len={len(self._heap)}, reverse={self.reverse})"

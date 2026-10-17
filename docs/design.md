@@ -392,6 +392,29 @@ nothing native fits.
   takes several steps across a `dict`, two `list`s and the native heap. Guard
   a shared `PQDict` with a lock.
 
+## Generic priorities
+
+The native core and the float fallback order only numbers, because the native
+key encoding needs a fixed-width order-preserving integer. For anything else
+that supports `<`, `PQDict(priority_type="object")` uses `ObjectHeap`, which
+reuses the pure-Python heap unchanged:
+
+- That heap compares keys only with `<` and `>=`. A min-heap therefore stores
+  the priority objects as they are, and a max-heap wraps them in a two-method
+  `_Reversed` object that inverts both comparisons. Objects can't be negated
+  the way floats are, so this replaces the float core's sign trick.
+- Comparing incomparable types (`str` with `int`) raises in the middle of a
+  sift, after entries have moved. So before any mutation, every new priority
+  is compared with a reference, the current top or else the first new
+  priority. A mismatch then fails with no effect.
+
+The choice is explicit, and the default stays numeric on the native core,
+so performance never changes silently. A native string core is feasible:
+UTF-8 byte order equals Python's `str` order, including for surrogates. It
+would mean string copies in Rust and a prefix-keyed tournament for an
+estimated 2–4× end to end, so it is left for if string-heavy workloads need
+it.
+
 ## Alternatives considered
 
 | Design | Why not |

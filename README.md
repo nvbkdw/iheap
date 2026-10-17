@@ -112,7 +112,9 @@ Module functions: `minpq(**kw)`, `maxpq(**kw)`, `nsmallest(n, mapping, key=None)
 
 Differences from `pqdict`:
 
-- priorities must be real numbers;
+- priorities are numbers by default, running on the Rust core. Any
+  comparable objects (strings, tuples, dates, …) work with
+  `priority_type="object"`, on a pure-Python core;
 - the custom comparator `precedes=` is replaced by `reverse=`;
 - the `key` function receives the item's key as well as its value,
   `key(item_key, value)`. To port `key=f`, write `key=lambda k, v: f(v)`.
