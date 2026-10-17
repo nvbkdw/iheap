@@ -122,7 +122,7 @@ impl PyIndexedHeap {
         self.inner.clear();
     }
 
-    /// Live ``(handle, priority)`` pairs in internal heap order (not sorted).
+    /// Live ``(handle, priority)`` pairs in handle order (not priority order).
     fn items(&self) -> Vec<(Handle, f64)> {
         self.inner.iter().collect()
     }

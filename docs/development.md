@@ -3,38 +3,46 @@
 ## Architecture
 
 ```
-           Python (iheap.PQDict)                 Rust (iheap-core)
-  ┌───────────────────────────────────┐   ┌────────────────────────────────┐
-  │ _handles: dict[key -> handle]     │   │ nodes:     [(priority, handle)]│ 4-ary heap
-  │ _keys:    list[handle -> key]     │──▶│ positions: [handle -> node idx]│
-  │ _values:  list[handle -> value]   │   │ free:      [recycled handles]  │
-  └───────────────────────────────────┘   └────────────────────────────────┘
+           Python (iheap.PQDict)                     Rust (iheap-core)
+  ┌───────────────────────────────────┐   ┌─────────────────────────────────────┐
+  │ _handles: dict[key -> handle]     │   │ 8-ary tournament tree               │
+  │ _keys:    list[handle -> key]     │──▶│   leaves[h]  = priority of handle h │
+  │ _values:  list[handle -> value]   │   │   node       = winner of 8 children │
+  └───────────────────────────────────┘   └─────────────────────────────────────┘
                     only f64 priorities and u32 handles cross ▲
 ```
 
 The design rests on these decisions:
 
-- **Handles, not keys.** The Rust heap gives out dense `u32` handles and
-  recycles them through a free list. Python keeps keys and values in lists
-  indexed by handle. Rust never holds a Python object and never calls back
-  into Python, so no Python `__lt__` runs in the hot loop.
-- **`f64` priorities.** Comparing native floats is what makes the core fast.
-  The alternative, generic Python priorities, would require a call back into
-  Python for every comparison and lose most of the speed.
-- **4-ary heap with hole-based sifting.** The heap is half as deep as a binary
-  heap, and the four children of a node (4 × 16 B) fit in one cache line.
-  Sifting moves nodes into a "hole" rather than swapping them, which halves
-  the writes.
-- **Max-heap by negation.** Priorities are negated on the way in and out, so
-  there is no comparator branch in the hot loop.
+- **Handles, not keys.** The core gives out dense `u32` handles and recycles
+  them through a free list. Python keeps keys and values in lists indexed by
+  handle. Rust never holds a Python object and never calls back into Python.
+- **`f64` priorities, stored as order-preserving `u64` keys.** The core
+  compares native integers, never calling back into Python. The key encoding
+  also gives a total order (`-0.0` and `+0.0` both round-trip) and a sentinel
+  for vacant leaves that no real priority can collide with.
+- **An 8-ary tournament tree.** Leaf `h` holds the priority of handle `h`, so
+  there is no position map. Each internal node holds the winner of a group of
+  8 children: a 64-byte line for leaves, 128 bytes for nodes. The node above
+  leaf `h` on level `l` is `h >> 3(l+1)`, independent of the tree's size, so
+  growth only appends.
+- **Latency first.** `pop` replays the winner's path. The winner among the
+  other siblings on each level doesn't depend on the replayed value, so all
+  levels' reductions (NEON on aarch64) run in parallel. Updates use a
+  two-phase replay with early exit. See the [benchmark](benchmark.md) for the
+  measurements behind each choice.
 - **Atomic batch operations.** `push_many` and `update_many` validate their
-  whole input before changing anything, and switch to an `O(n)` heapify when
+  whole input before changing anything, and rebuild in `O(n)` when
   `k · log₂ n ≥ n`.
 
 ## Repository layout
 
 ```
-crates/iheap-core/     pure-Rust heap: no PyO3, its own unit + randomized model tests
+crates/iheap-core/     pure-Rust core: no PyO3
+  src/heap.rs          IndexedHeap (the tournament tree)
+  src/group.rs         nodes, 8-wide groups, NEON/scalar reductions
+  src/key.rs           order-preserving f64 -> u64 key encoding
+  tests/model.rs       randomized differential test against a HashMap model
   examples/bench.rs    core-only micro-benchmark
 crates/iheap-py/       thin PyO3 binding (abi3-py310) -> iheap._iheap
 python/iheap/          Python package

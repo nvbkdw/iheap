@@ -84,7 +84,7 @@ class IndexedHeap:
             IndexError: The heap is empty.
         """
     def push_pop(self, priority: float) -> tuple[int, float] | None:
-        """Fused push-then-pop with a single sift (like ``heapq.heappushpop``).
+        """Fused push-then-pop in a single pass (like ``heapq.heappushpop``).
 
         Args:
             priority: Priority of the new entry.
@@ -144,7 +144,7 @@ class IndexedHeap:
     def clear(self) -> None:
         """Remove every entry. Handle numbering restarts at 0."""
     def items(self) -> list[tuple[int, float]]:
-        """Return live ``(handle, priority)`` pairs in internal heap order (not sorted)."""
+        """Return live ``(handle, priority)`` pairs in handle order (not priority order)."""
     def copy(self) -> IndexedHeap:
         """Return an independent copy, handles included."""
     def __copy__(self) -> IndexedHeap: ...

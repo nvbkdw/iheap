@@ -112,7 +112,7 @@ pq = PQDict({"a": 5, "b": 7})
 pq.additem("c", 6)                 # strict insert: KeyError if "c" exists
 pq.updateitem("c", 8)              # strict update: KeyError if "c" is missing
 
-# Push and pop in one sift (like heapq.heappushpop):
+# Push and pop in one pass (like heapq.heappushpop):
 assert pq.pushpopitem("d", 1) == ("d", 1)    # would be on top: returned as-is
 assert pq.pushpopitem("e", 6) == ("a", 5)    # "a" popped, "e" inserted
 

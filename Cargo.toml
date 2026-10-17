@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/nvbkdw/iheap"
-rust-version = "1.74"
+rust-version = "1.88"  # std::hint::select_unpredictable
 
 [profile.release]
 lto = "fat"

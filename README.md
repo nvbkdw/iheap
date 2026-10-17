@@ -31,31 +31,41 @@ Only priorities (as `f64`) and integer handles cross into Rust. Keys and
 values (the payload) never leave Python.
 
 ```
-           Python (iheap.PQDict)                 Rust (iheap-core)
-  ┌───────────────────────────────────┐   ┌────────────────────────────────┐
-  │ _handles: dict[key -> handle]     │   │ nodes:     [(priority, handle)]│ 4-ary heap
-  │ _keys:    list[handle -> key]     │──▶│ positions: [handle -> node idx]│
-  │ _values:  list[handle -> value]   │   │ free:      [recycled handles]  │
-  └───────────────────────────────────┘   └────────────────────────────────┘
+           Python (iheap.PQDict)                     Rust (iheap-core)
+  ┌───────────────────────────────────┐   ┌─────────────────────────────────────┐
+  │ _handles: dict[key -> handle]     │   │ 8-ary tournament tree               │
+  │ _keys:    list[handle -> key]     │──▶│   leaves[h]  = priority of handle h │
+  │ _values:  list[handle -> value]   │   │   node       = winner of 8 children │
+  └───────────────────────────────────┘   └─────────────────────────────────────┘
                     only f64 priorities and u32 handles cross ▲
 ```
 
-* **Handles, not keys.** The Rust heap gives out dense `u32` handles and
+* **Handles, not keys.** The Rust core gives out dense `u32` handles and
   recycles them, so Python keeps its key/value data in plain lists indexed by
   handle. Rust never holds a Python object and never calls back into Python.
-* **`f64` priorities.** Comparing native floats is what makes the core fast.
-  Ints are exact up to 2⁵³. NaN is rejected with `ValueError`.
-* **4-ary heap with hole-based sifting.** It is half as deep as a binary heap,
-  and a node's four children (4 × 16 B) fit in one 64-byte cache line. Sifting
-  moves nodes into a "hole" instead of swapping them. Measured against other
-  arities: about 1.5× faster than binary; 8-ary was within noise.
-* **Max-heap by negation.** Priorities are negated on the way in and out, so
-  the comparison loop has no extra branch.
-* **Batch operations.** `push_many` and `update_many` switch to an `O(n)`
-  heapify when the batch is large enough to make that cheaper. Building a
-  `PQDict` takes one native call.
+* **An 8-ary tournament (winner) tree, not a binary heap.** Leaf `h` holds the
+  priority of handle `h`, so no position map is needed. Each internal node
+  stores the winner of 8 children. A sibling group is one 64- or 128-byte
+  cache-line block.
+* **The path is known in advance.** Every operation writes one leaf and
+  replays the path to the root, and the node above leaf `h` on each level is
+  `h >> 3·level`. In a heap's sift-down, each load must wait for the previous
+  comparison. Here, the winner among the *other* siblings on each level
+  doesn't depend on the value being replayed, so the CPU computes all levels
+  in parallel. The serial work per level is a single compare-and-select. On
+  aarch64, the 8-way reductions use NEON.
+* **Early exit.** Updates stop once a node's winner is unchanged, so insert,
+  decrease-key and changes to non-winning entries usually take one or two
+  comparisons.
+* **Order-preserving `u64` keys.** Priorities are stored as integers with the
+  same ordering. This gives integer compares and a total order: `-0.0` sorts
+  before `+0.0`, and both round-trip exactly. A vacant-leaf sentinel can never
+  collide with a real priority, because it corresponds to NaN, which is
+  rejected. A max-queue complements the keys.
+* **Growth only appends.** Bulk loads (`push_many`, `PQDict(data)`) rebuild
+  the tree in `O(n)`, and building a `PQDict` takes one native call.
 * **Clean layering.** `crates/iheap-core` is pure Rust with no PyO3 dependency
-  and its own tests. `crates/iheap-py` is a thin PyO3 binding.
+  and has its own tests. `crates/iheap-py` is a thin PyO3 binding.
   `python/iheap/_pqdict.py` implements the mapping API.
 
 ## API
@@ -80,7 +90,7 @@ inserted.
 | `top(default)`, `topvalue(default)`, `topitem()` | look at the top item |
 | `pop()`, `popvalue(default)`, `popitem()` | remove the top item (`pop(key[, default])` keeps dict semantics) |
 | `additem(k, v)` / `updateitem(k, v)` | strict insert / strict update |
-| `pushpopitem(k, v)` | push then pop, done as a single sift |
+| `pushpopitem(k, v)` | push then pop, done as a single tree replay |
 | `replace_key(k, new_k)`, `swap_priority(k1, k2)` | change keys in place (no heap work) |
 | `popkeys()`, `popvalues()`, `popitems()` | destructive iteration in priority order |
 | `heapify(key=None)` | re-prioritize after a value was mutated in place |
@@ -142,46 +152,48 @@ operation, lower is better**, with the speed-up over `pqdict` in parentheses.
 
 | implementation | insert | build | update | delete | pop |
 |---|---:|---:|---:|---:|---:|
-| iheap.PQDict | 154 (3.4x) | 48 (12.2x) | 137 (6.7x) | 139 (5.5x) | 183 (12.8x) |
-| iheap.IndexedHeap | 60 (8.9x) | 42 (13.9x) | 79 (11.6x) | 81 (9.4x) | 117 (20.0x) |
-| pqdict | 533 | 587 | 915 | 757 | 2,329 |
-| heapq (lazy) | 191 (2.8x) | 111 (5.3x) | 201 (4.6x) | 83 (9.2x) | 390 (6.0x) |
+| iheap.PQDict | 155 (3.4x) | 48 (11.6x) | 122 (7.1x) | 134 (5.6x) | 139 (16.7x) |
+| iheap.IndexedHeap | 56 (9.4x) | 38 (14.4x) | 55 (15.6x) | 70 (10.8x) | 87 (26.6x) |
+| pqdict | 527 | 552 | 867 | 759 | 2,322 |
+| heapq (lazy) | 185 (2.9x) | 114 (4.9x) | 234 (3.7x) | 76 (9.9x) | 425 (5.5x) |
 
 **n = 100,000**
 
 | implementation | insert | build | update | delete | pop |
 |---|---:|---:|---:|---:|---:|
-| iheap.PQDict | 176 (3.6x) | 60 (11.3x) | 288 (5.6x) | 285 (5.0x) | 313 (11.8x) |
-| iheap.IndexedHeap | 76 (8.2x) | 52 (12.9x) | 123 (13.1x) | 201 (7.2x) | 237 (15.6x) |
-| pqdict | 626 | 675 | 1,612 | 1,436 | 3,691 |
-| heapq (lazy) | 238 (2.6x) | 154 (4.4x) | 447 (3.6x) | 244 (5.9x) | 960 (3.8x) |
+| iheap.PQDict | 178 (3.4x) | 61 (11.1x) | 264 (6.0x) | 317 (4.5x) | 293 (14.9x) |
+| iheap.IndexedHeap | 75 (8.0x) | 53 (12.6x) | 118 (13.5x) | 149 (9.5x) | 184 (23.8x) |
+| pqdict | 603 | 674 | 1,593 | 1,415 | 4,376 |
+| heapq (lazy) | 237 (2.5x) | 147 (4.6x) | 487 (3.3x) | 283 (5.0x) | 970 (4.5x) |
 
 **n = 1,000,000**
 
 | implementation | insert | build | update | delete | pop |
 |---|---:|---:|---:|---:|---:|
-| iheap.PQDict | 246 (2.9x) | 109 (8.1x) | 846 (3.1x) | 815 (3.0x) | 873 (9.5x) |
-| iheap.IndexedHeap | 156 (4.6x) | 92 (9.7x) | 623 (4.2x) | 584 (4.2x) | 694 (11.9x) |
-| pqdict | 724 | 887 | 2,591 | 2,429 | 8,283 |
-| heapq (lazy) | 331 (2.2x) | 232 (3.8x) | 803 (3.2x) | 570 (4.3x) | 2,336 (3.5x) |
+| iheap.PQDict | 260 (3.0x) | 110 (8.6x) | 660 (4.1x) | 760 (3.3x) | 754 (11.9x) |
+| iheap.IndexedHeap | 151 (5.1x) | 87 (10.9x) | 459 (5.9x) | 491 (5.1x) | 614 (14.6x) |
+| pqdict | 769 | 950 | 2,688 | 2,512 | 8,977 |
+| heapq (lazy) | 360 (2.1x) | 245 (3.9x) | 860 (3.1x) | 552 (4.6x) | 2,473 (3.6x) |
 
-The Rust core on its own (`cargo run --release --example bench -p iheap-core`)
-takes 5–20 ns per insert/update/delete and 40–70 ns per pop at n = 100k–1M.
-So most of the time measured from Python is the interpreter itself: method
-dispatch, dict lookups on string keys, and cache misses on Python objects.
-The largest remaining cost is the ~100 ns `PQDict` adds per call on top of
-the raw API, which is the price of a Python-level `__setitem__` frame.
+### The Rust core alone
 
-Optimizations that were tried and kept:
+`cargo run --release --example bench -p iheap-core` measures the core with
+Python out of the picture. The table compares the current tournament tree
+with the 4-ary binary heap used at first, in ns per operation:
 
-* inlining helper calls on hot paths: −15–25% per op
-* bulk build through `push_many` and C-level `zip`/`dict`: build went from 3× to 11–12× faster than `pqdict`
-* 4-ary instead of binary heap: about 1.5× faster core
+| n | insert | build | update | delete | pop |
+|---:|---:|---:|---:|---:|---:|
+| 10k | 3.0 → 3.0 (1.0×) | 3.5 → 2.2 (1.6×) | 3.2 → 2.0 (1.6×) | 3.9 → 2.5 (1.6×) | 25.2 → 17.1 (1.5×) |
+| 100k | 5.3 → 4.3 (1.2×) | 4.1 → 2.1 (2.0×) | 10.5 → 3.5 (3.0×) | 5.9 → 3.1 (1.9×) | 37.5 → 20.3 (1.8×) |
+| 1M | 8.0 → 4.9 (1.6×) | 4.7 → 2.6 (1.8×) | 18.2 → 5.6 (3.2×) | 14.1 → 5.4 (2.6×) | 64.0 → 29.6 (2.2×) |
 
-Tried and rejected because they made no difference or were slower:
-
-* Floyd's bottom-up pop
-* a branch-free 4-way tournament for choosing the minimum child (about 25% slower)
+From n = 100k up, the core is **2.1× faster** (geometric mean over the five
+operations). In the Python benchmark above, the core accounts for only 5–20%
+of the time; the rest is the interpreter itself (method dispatch, `dict`
+lookups on string keys, object allocation). End to end, the new core makes
+`IndexedHeap` 1.1–1.4× faster and `PQDict` up to 1.3× faster. The
+[benchmark docs](https://nvbkdw.github.io/iheap/benchmark/) include the full
+optimization log, with every experiment that was kept or rejected.
 
 Reproduce with:
 

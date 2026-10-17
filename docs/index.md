@@ -27,9 +27,10 @@ assert list(pq.popitems()) == [("a", -1), ("d", 0), ("b", 1)]
   the whole `pqdict` priority-queue API.
 - **The payload stays in Python.** Only `float` priorities and integer handles
   cross into Rust. Your keys and values are never copied or converted.
-- **Native speed where it counts.** The core is a cache-friendly 4-ary heap
-  that takes 5–70 ns per operation. Bulk construction and bulk updates run as
-  a single `O(n)` native call.
+- **Native speed where it counts.** The core is a cache-aware 8-ary
+  tournament tree with SIMD reductions: 2–6 ns per insert, update or delete,
+  and 17–30 ns per pop. Bulk construction and bulk updates run as a single
+  `O(n)` native call.
 - **Two levels of API.** Use [`PQDict`][iheap.PQDict] for convenience, or the
   raw handle-based [`IndexedHeap`][iheap.IndexedHeap] when you manage your
   own storage.

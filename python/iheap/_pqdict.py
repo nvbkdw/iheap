@@ -401,7 +401,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         self[key] = new_val
 
     def pushpopitem(self, key: K, value: V) -> tuple[K, V]:
-        """Push an item, then pop and return the top one, in a single sift.
+        """Push an item, then pop and return the top one, in a single pass.
 
         Faster than ``additem`` followed by ``popitem``. If the new item would
         be on top, it is returned straight away and the queue is unchanged.
