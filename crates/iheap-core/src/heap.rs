@@ -38,22 +38,34 @@ impl Default for IndexedHeap {
 
 impl IndexedHeap {
     pub fn new(order: Order) -> Self {
-        Self::with_capacity(order, 0)
-    }
-
-    /// Pre-allocates room for `capacity` handles.
-    pub fn with_capacity(order: Order, capacity: usize) -> Self {
-        let mut heap = Self {
-            leaves: Vec::new(),
+        Self {
+            leaves: vec![VACANT_LEAVES],
             levels: Vec::new(),
             root: EMPTY,
             bound: 0,
             len: 0,
             free: Vec::new(),
             order,
-        };
-        heap.reserve_leaves(capacity);
-        heap
+        }
+    }
+
+    /// Pre-allocates room for `capacity` handles. The capacity is a hint: if
+    /// it exceeds [`MAX_LEN`] or cannot be allocated, a smaller heap is
+    /// created and grows on demand.
+    pub fn with_capacity(order: Order, capacity: usize) -> Self {
+        Self::try_with_capacity(order, capacity.min(MAX_LEN)).unwrap_or_else(|_| Self::new(order))
+    }
+
+    /// Like [`with_capacity`](Self::with_capacity), but reports a capacity
+    /// above [`MAX_LEN`] ([`Error::CapacityOverflow`]) or a failed
+    /// allocation ([`Error::OutOfMemory`]) instead.
+    pub fn try_with_capacity(order: Order, capacity: usize) -> Result<Self> {
+        if capacity > MAX_LEN {
+            return Err(Error::CapacityOverflow);
+        }
+        let mut heap = Self::new(order);
+        heap.reserve_leaves(capacity)?;
+        Ok(heap)
     }
 
     #[inline]
@@ -97,7 +109,7 @@ impl IndexedHeap {
         if self.len >= MAX_LEN {
             return Err(Error::CapacityOverflow);
         }
-        let handle = self.allocate();
+        let handle = self.allocate()?;
         self.set_leaf(handle, key);
         Ok(handle)
     }
@@ -115,11 +127,13 @@ impl IndexedHeap {
         if MAX_LEN - self.len < keys.len() {
             return Err(Error::CapacityOverflow);
         }
-        let rebuild = prefer_rebuild(keys.len(), self.len + keys.len());
-        self.reserve_leaves(self.bound + keys.len());
+        // Recycled handles come first; only the rest extend `bound`.
+        let bound = self.bound + keys.len().saturating_sub(self.free.len());
+        let rebuild = prefer_rebuild(keys.len(), self.len + keys.len(), bound);
+        self.reserve_leaves(bound)?; // all memory up front: the loop cannot fail
         let mut handles = Vec::with_capacity(keys.len());
         for key in keys {
-            let handle = self.allocate();
+            let handle = self.allocate()?;
             if rebuild {
                 self.write_leaf(handle, key);
             } else {
@@ -170,8 +184,8 @@ impl IndexedHeap {
 
     /// Sets the priority of `handle` and returns the previous one.
     pub fn update(&mut self, handle: Handle, priority: f64) -> Result<f64> {
-        let old = self.live_key(handle).ok_or(Error::InvalidHandle(handle))?;
         let key = encode(priority, self.order)?;
+        let old = self.live_key(handle).ok_or(Error::InvalidHandle(handle))?;
         self.set_leaf(handle, key);
         Ok(decode(old, self.order))
     }
@@ -185,12 +199,16 @@ impl IndexedHeap {
                 priorities: priorities.len(),
             });
         }
-        let mut targets = Vec::with_capacity(handles.len());
-        for (&h, &p) in handles.iter().zip(priorities) {
-            self.live_key(h).ok_or(Error::InvalidHandle(h))?;
-            targets.push((h, encode(p, self.order)?));
+        // Validate priorities first, then handles (same precedence as `update`).
+        let keys = priorities
+            .iter()
+            .map(|&p| encode(p, self.order))
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(&h) = handles.iter().find(|&&h| self.live_key(h).is_none()) {
+            return Err(Error::InvalidHandle(h));
         }
-        if prefer_rebuild(targets.len(), self.len) {
+        let targets: Vec<(Handle, u64)> = handles.iter().copied().zip(keys).collect();
+        if prefer_rebuild(targets.len(), self.len, self.bound) {
             for (h, key) in targets {
                 self.write_leaf(h, key);
             }
@@ -213,15 +231,70 @@ impl IndexedHeap {
     }
 
     /// Removes every entry and resets handle allocation. Keeps the memory.
+    ///
+    /// Takes time proportional to `handle_bound`, not to the allocation:
+    /// everything beyond the issued handles is already vacant/`EMPTY`.
     pub fn clear(&mut self) {
-        self.leaves.fill(VACANT_LEAVES);
+        let mut groups = self.bound.div_ceil(FANOUT); // dirty groups per level
+        self.leaves[..groups].fill(VACANT_LEAVES);
         for level in &mut self.levels {
-            level.fill(EMPTY_NODES);
+            groups = groups.div_ceil(FANOUT);
+            level[..groups].fill(EMPTY_NODES);
         }
         self.root = EMPTY;
         self.bound = 0;
         self.len = 0;
         self.free.clear();
+    }
+
+    /// Recycled handles, in the order they will be reused (last first).
+    /// Together with [`iter`](Self::iter) and [`handle_bound`](Self::handle_bound)
+    /// this is the heap's complete state; see [`from_parts`](Self::from_parts).
+    pub fn free_handles(&self) -> &[Handle] {
+        &self.free
+    }
+
+    /// Rebuilds a heap from exported state, reproducing handle allocation
+    /// exactly: `entries` are the live `(handle, priority)` pairs, `free` the
+    /// recycled handles. Every handle below `bound` must appear exactly once
+    /// in `entries` or `free`.
+    pub fn from_parts(
+        order: Order,
+        bound: usize,
+        entries: &[(Handle, f64)],
+        free: &[Handle],
+    ) -> Result<Self> {
+        if bound > MAX_LEN {
+            return Err(Error::InvalidParts("bound exceeds MAX_LEN"));
+        }
+        if entries.len() + free.len() != bound {
+            return Err(Error::InvalidParts(
+                "entries and free handles must cover the bound",
+            ));
+        }
+        let mut heap = Self::try_with_capacity(order, bound)?;
+        let mut seen = vec![false; bound];
+        let mut claim = |h: Handle| match seen.get_mut(h as usize) {
+            Some(slot) if !*slot => {
+                *slot = true;
+                Ok(())
+            }
+            Some(_) => Err(Error::InvalidParts("duplicate handle")),
+            None => Err(Error::InvalidParts("handle out of range")),
+        };
+        for &h in free {
+            claim(h)?;
+        }
+        for &(h, p) in entries {
+            claim(h)?;
+            let key = encode(p, order)?;
+            heap.write_leaf(h, key);
+        }
+        heap.bound = bound;
+        heap.len = entries.len();
+        heap.free = free.to_vec();
+        heap.rebuild();
+        Ok(heap)
     }
 
     /// Iterates over live entries in handle order.
@@ -247,43 +320,80 @@ impl IndexedHeap {
     }
 
     /// Returns a vacant handle: a recycled one, else the next fresh one.
-    /// Caller guarantees fewer than `MAX_LEN` live entries.
+    /// Caller guarantees fewer than `MAX_LEN` live entries. Fails only if
+    /// the tree must grow and memory runs out; the heap is then unchanged.
     #[inline]
-    fn allocate(&mut self) -> Handle {
+    fn allocate(&mut self) -> Result<Handle> {
+        let handle = match self.free.pop() {
+            Some(handle) => handle,
+            None => {
+                if self.bound == self.leaves.len() * FANOUT {
+                    // Grow by half again (amortized O(1)), not one group at a time.
+                    let target = (self.bound + self.bound / 2).clamp(self.bound + 1, MAX_LEN);
+                    self.reserve_leaves(target)?;
+                }
+                self.bound += 1;
+                (self.bound - 1) as Handle
+            }
+        };
         self.len += 1;
-        if let Some(handle) = self.free.pop() {
-            return handle;
-        }
-        if self.bound == self.leaves.len() * FANOUT {
-            self.reserve_leaves(self.bound + 1);
-        }
-        self.bound += 1;
-        (self.bound - 1) as Handle
+        Ok(handle)
     }
 
     /// Makes room for `leaves` leaves. New nodes cover only vacant leaves, so
     /// `EMPTY` is already their correct winner; nothing is rebuilt. When the
     /// top level gains a second group, a new level is added above it whose
     /// first node is the old root, and the root itself is unchanged.
+    ///
+    /// All memory is reserved before anything is changed: on allocation
+    /// failure the heap is left exactly as it was.
     #[cold]
-    fn reserve_leaves(&mut self, leaves: usize) {
-        let mut groups = leaves.div_ceil(FANOUT).max(1); // groups on the leaf level
-        if self.leaves.len() < groups {
-            self.leaves.resize(groups, VACANT_LEAVES);
+    fn reserve_leaves(&mut self, leaves: usize) -> Result<()> {
+        let oom = |_| Error::OutOfMemory;
+        // Groups needed per level: the leaves, then each internal level.
+        let mut sizes = vec![leaves.div_ceil(FANOUT).max(1)];
+        while *sizes.last().unwrap() > 1 {
+            sizes.push(sizes.last().unwrap().div_ceil(FANOUT));
         }
-        let mut level = 0;
-        while groups > 1 {
-            let level_groups = groups.div_ceil(FANOUT); // for `groups` nodes
+        let internal = &sizes[1..]; // groups for levels 0, 1, ...
+        let grow = |have: usize, want: usize| want.saturating_sub(have);
+        self.leaves
+            .try_reserve_exact(grow(self.leaves.len(), sizes[0]))
+            .map_err(oom)?;
+        self.levels
+            .try_reserve(grow(self.levels.len(), internal.len()))
+            .map_err(oom)?;
+        let mut new_levels = Vec::new();
+        for (level, &want) in internal.iter().enumerate() {
+            match self.levels.get_mut(level) {
+                Some(nodes) => nodes
+                    .try_reserve_exact(grow(nodes.len(), want))
+                    .map_err(oom)?,
+                None => {
+                    let mut top: Vec<NodeGroup> = Vec::new();
+                    top.try_reserve_exact(want).map_err(oom)?;
+                    new_levels.push(top);
+                }
+            }
+        }
+        // Commit: nothing below allocates.
+        if self.leaves.len() < sizes[0] {
+            self.leaves.resize(sizes[0], VACANT_LEAVES);
+        }
+        let mut new_levels = new_levels.into_iter();
+        for (level, &want) in internal.iter().enumerate() {
             if level == self.levels.len() {
-                let mut top = vec![EMPTY_NODES; level_groups];
+                let mut top = new_levels.next().expect("reserved above");
+                top.resize(want, EMPTY_NODES);
+                // The old top level (or the leaf level) was a single group;
+                // its winner, the root, becomes this level's first node.
                 top[0].0[0] = self.root;
                 self.levels.push(top);
-            } else if self.levels[level].len() < level_groups {
-                self.levels[level].resize(level_groups, EMPTY_NODES);
+            } else if self.levels[level].len() < want {
+                self.levels[level].resize(want, EMPTY_NODES);
             }
-            groups = level_groups;
-            level += 1;
         }
+        Ok(())
     }
 
     /// Gives the overall winner a new key and replays its whole path. It won
@@ -387,9 +497,12 @@ impl IndexedHeap {
         }
     }
 
-    /// Recomputes every internal node and the root from the leaves in `O(n)`.
+    /// Recomputes the internal nodes and the root from the leaves, in time
+    /// proportional to `bound` rather than to the allocated capacity: nodes
+    /// covering only leaves at or past `bound` cover vacant leaves only and
+    /// already hold `EMPTY` (growth and `clear` both write it).
     fn rebuild(&mut self) {
-        let mut nodes = self.leaves.len(); // nodes on the current level
+        let mut nodes = self.bound.div_ceil(FANOUT).max(1); // nodes on the current level
         for level in 0..self.levels.len() {
             for i in 0..nodes {
                 let w = match level {
@@ -574,6 +687,84 @@ mod tests {
                 heap.assert_invariants();
             }
         }
+    }
+
+    /// Small bulk operations stay cheap on a heap with a large allocation:
+    /// after popping down (high `bound`, few live entries) and after `clear`
+    /// (memory kept). Each case would take seconds if it rebuilt the tree.
+    #[test]
+    fn small_batches_ignore_capacity() {
+        let n = 2_000_000;
+        let mut heap = IndexedHeap::new(Order::Min);
+        heap.push_many(&vec![1.0; n]).unwrap();
+        heap.pop_many(n - 4);
+        let live: Vec<Handle> = heap.iter().map(|(h, _)| h).collect();
+        let start = std::time::Instant::now();
+        for i in 0..1_000 {
+            heap.update_many(&live[..3], &[i as f64, 2.0, 3.0]).unwrap();
+            let hs = heap.push_many(&[3.0, 1.0, 2.0, 0.0]).unwrap();
+            for h in hs {
+                heap.remove(h).unwrap();
+            }
+        }
+        heap.clear();
+        for _ in 0..1_000 {
+            heap.push_many(&[3.0, 1.0, 2.0, 0.0]).unwrap();
+            heap.clear();
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "{:?}",
+            start.elapsed()
+        );
+        heap.assert_invariants();
+    }
+
+    /// Exported state round-trips exactly, including future handle reuse.
+    #[test]
+    fn from_parts_round_trips() {
+        let mut heap = IndexedHeap::new(Order::Max);
+        heap.push_many(&[5.0, 1.0, 4.0, 2.0, 3.0]).unwrap();
+        heap.remove(1).unwrap();
+        heap.remove(3).unwrap();
+        let entries: Vec<_> = heap.iter().collect();
+        let mut copy = IndexedHeap::from_parts(
+            Order::Max,
+            heap.handle_bound(),
+            &entries,
+            heap.free_handles(),
+        )
+        .unwrap();
+        copy.assert_invariants();
+        assert_eq!(copy.push(9.0), heap.push(9.0), "same next handle");
+        assert_eq!(drain(&mut copy), drain(&mut heap));
+
+        let bad = |bound, entries: &[(Handle, f64)], free: &[Handle]| {
+            IndexedHeap::from_parts(Order::Min, bound, entries, free).unwrap_err()
+        };
+        assert!(matches!(bad(2, &[(0, 1.0)], &[]), Error::InvalidParts(_)));
+        assert!(matches!(bad(2, &[(0, 1.0)], &[0]), Error::InvalidParts(_)));
+        assert!(matches!(bad(2, &[(0, 1.0)], &[5]), Error::InvalidParts(_)));
+        assert_eq!(bad(1, &[(0, f64::NAN)], &[]), Error::NanPriority);
+    }
+
+    #[test]
+    fn capacity_errors_instead_of_aborting() {
+        assert_eq!(
+            IndexedHeap::try_with_capacity(Order::Min, MAX_LEN + 1).unwrap_err(),
+            Error::CapacityOverflow
+        );
+        // The infallible constructor treats capacity as a hint.
+        assert!(IndexedHeap::with_capacity(Order::Min, usize::MAX).is_empty());
+    }
+
+    /// Priority errors take precedence over handle errors (as in the pure core).
+    #[test]
+    fn error_precedence() {
+        let mut heap = IndexedHeap::new(Order::Min);
+        assert_eq!(heap.update(7, f64::NAN), Err(Error::NanPriority));
+        assert_eq!(heap.update_many(&[7], &[f64::NAN]), Err(Error::NanPriority));
+        assert_eq!(heap.update_many(&[7], &[1.0]), Err(Error::InvalidHandle(7)));
     }
 
     #[test]

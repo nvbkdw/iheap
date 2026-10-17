@@ -2,8 +2,9 @@
 //!
 //! A group of 8 leaf keys is one 64-byte line; a group of 8 internal nodes is
 //! 128 bytes (one line on Apple silicon, two adjacent lines on x86). The
-//! reductions are on the critical path of every `pop`, so on aarch64 they use
-//! NEON (part of the baseline ISA, so no runtime detection): a two-round
+//! reductions are on the critical path of every `pop`, so on little-endian
+//! aarch64 with NEON (every standard aarch64 target; no runtime detection
+//! needed) they use NEON: a two-round
 //! lane-wise tournament with mask selects, then one scalar select across the
 //! two lanes. Elsewhere a branch-free scalar tournament (compiled to `cmov`)
 //! is used. Ties may go to either side; the tree only needs *a* minimum.
@@ -63,18 +64,34 @@ pub(crate) struct NodeGroup(pub(crate) [Node; FANOUT]);
 pub(crate) const VACANT_LEAVES: LeafGroup = LeafGroup([VACANT; FANOUT]);
 pub(crate) const EMPTY_NODES: NodeGroup = NodeGroup([EMPTY; FANOUT]);
 
+// The SIMD loads read whole nodes and groups as arrays of `u64`.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<Node>() == 16 && offset_of!(Node, key) == 0 && offset_of!(Node, leaf) == 8);
+    assert!(size_of::<NodeGroup>() == 128 && align_of::<NodeGroup>() == 128);
+    assert!(size_of::<LeafGroup>() == 64 && align_of::<LeafGroup>() == 64);
+};
+
 /// Lane value that excludes no lane from a reduction.
 pub(crate) const NO_SKIP: usize = FANOUT;
 
 /// Winner of the nodes in `group`, ignoring lane `skip`.
 #[inline(always)]
 pub(crate) fn group_winner(group: &NodeGroup, skip: usize) -> Node {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        target_feature = "neon"
+    ))]
     {
-        // SAFETY: NEON is mandatory on aarch64; reads stay within `group`.
+        // SAFETY: compiled only with the `neon` target feature; reads stay within `group`.
         unsafe { neon::group_winner(group, skip) }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        target_feature = "neon"
+    )))]
     {
         scalar_winner(group.0, skip)
     }
@@ -84,13 +101,21 @@ pub(crate) fn group_winner(group: &NodeGroup, skip: usize) -> Node {
 #[inline(always)]
 pub(crate) fn leaf_group_winner(leaves: &LeafGroup, index: usize, skip: usize) -> Node {
     let base = (index * FANOUT) as Handle;
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        target_feature = "neon"
+    ))]
     {
-        // SAFETY: NEON is mandatory on aarch64; reads stay within `leaves`.
+        // SAFETY: compiled only with the `neon` target feature; reads stay within `leaves`.
         let (key, lane) = unsafe { neon::leaf_group_winner(leaves, skip) };
         Node::new(key, base + lane)
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        target_feature = "neon"
+    )))]
     {
         scalar_winner(
             std::array::from_fn(|j| Node::new(leaves.0[j], base + j as Handle)),
@@ -99,7 +124,14 @@ pub(crate) fn leaf_group_winner(leaves: &LeafGroup, index: usize, skip: usize) -
     }
 }
 
-#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+#[cfg_attr(
+    all(
+        target_arch = "aarch64",
+        target_endian = "little",
+        target_feature = "neon"
+    ),
+    allow(dead_code)
+)]
 #[inline(always)]
 fn scalar_winner(nodes: [Node; FANOUT], skip: usize) -> Node {
     let n: [Node; FANOUT] = std::array::from_fn(|j| Node {
@@ -112,7 +144,11 @@ fn scalar_winner(nodes: [Node; FANOUT], skip: usize) -> Node {
     )
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(
+    target_arch = "aarch64",
+    target_endian = "little",
+    target_feature = "neon"
+))]
 mod neon {
     use super::{LeafGroup, Node, NodeGroup};
     use core::arch::aarch64::*;
@@ -212,6 +248,9 @@ mod tests {
             let lane = (w.handle() - 100) as usize;
             assert!(lane != skip || w.key == VACANT);
             assert_eq!(keys[lane], w.key);
+
+            // The scalar path (used off aarch64) must agree, wherever we run.
+            assert_eq!(scalar_winner(nodes.0, skip).key, w.key);
 
             let leaves = LeafGroup(keys);
             let w = leaf_group_winner(&leaves, 3, skip);

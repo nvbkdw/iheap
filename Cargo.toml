@@ -12,4 +12,5 @@ rust-version = "1.88"  # std::hint::select_unpredictable
 [profile.release]
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# Keep unwinding: PyO3 turns a panic into a Python exception; abort would
+# take the whole interpreter down.

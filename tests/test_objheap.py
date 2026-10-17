@@ -106,7 +106,7 @@ def test_pqdict_object_priorities():
         pq["n"] = 1
     assert len(pq) == 3
     with pytest.raises(TypeError):
-        PQDict({"a": "text"})  # default "float" core: numbers only
+        PQDict({"a": "text"}, priority_type="float")  # pinned numeric core
     with pytest.raises(ValueError):
         PQDict(priority_type="decimal")  # type: ignore[arg-type]
 

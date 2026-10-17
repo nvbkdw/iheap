@@ -29,14 +29,17 @@ def test_concurrent_mutation_is_serialized():
     errors: list[BaseException] = []
     popped: list[list[float]] = [[] for _ in range(THREADS)]
 
+    mutated = threading.Barrier(THREADS)
+
     def worker(t: int) -> None:
         try:
             start.wait()
             mine = [heap.push(float(t * OPS + i)) for i in range(OPS)]
             for h in mine[::2]:
-                heap.update(h, -1.0)  # this thread's handles: still live
+                heap.update(h, -1.0)  # own handles: no thread pops yet
             for h in mine[1::4]:
                 heap.remove(h)
+            mutated.wait()  # pops only once every thread is done mutating
             for _ in range(OPS // 4):
                 popped[t].append(heap.pop()[1])
         except BaseException as exc:  # noqa: BLE001 - surfaced below

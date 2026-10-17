@@ -54,3 +54,29 @@ def test_random_operations_match(reverse):
         live = [h for h, _ in a.items()]
     assert a.items() == b.items()
     assert a.pop_many(len(a)) == b.pop_many(len(b))
+
+
+@pytest.mark.parametrize("make", [lambda: native.IndexedHeap(), lambda: _pyheap.IndexedHeap()])
+def test_argument_rules_match(make):
+    heap = make()
+    heap.push_many(x for x in [3.0, 1.0])  # any iterable
+    heap.update_many(iter([0]), (p for p in [5.0]))
+    assert heap.items() == [(0, 5.0), (1, 1.0)]
+    for bad_handle in (-1, 2**70, 99):
+        with pytest.raises(KeyError):
+            heap.priority(bad_handle)
+        assert bad_handle not in heap
+    with pytest.raises(TypeError):
+        heap.priority("0")
+    assert heap.pop_many(-3) == []
+    with pytest.raises(ValueError):
+        heap.update(99, math.nan)  # priority errors take precedence
+    assert type(make()).__name__ == "IndexedHeap"
+
+
+@pytest.mark.parametrize("cls", [native.IndexedHeap, _pyheap.IndexedHeap])
+def test_constructor_rules_match(cls):
+    assert cls(reverse=1).reverse and not cls(reverse=0).reverse
+    for bad in (-1, 2**40):
+        with pytest.raises(ValueError):
+            cls(capacity=bad)

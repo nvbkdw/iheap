@@ -56,6 +56,10 @@ pub enum Error {
     CapacityOverflow,
     /// Batch inputs of different lengths.
     LengthMismatch { handles: usize, priorities: usize },
+    /// Memory for the requested capacity could not be allocated.
+    OutOfMemory,
+    /// Inconsistent state passed to [`IndexedHeap::from_parts`].
+    InvalidParts(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -68,6 +72,8 @@ impl fmt::Display for Error {
                 handles,
                 priorities,
             } => write!(f, "got {handles} handles but {priorities} priorities"),
+            Error::OutOfMemory => f.write_str("cannot allocate memory for the heap"),
+            Error::InvalidParts(why) => write!(f, "invalid heap state: {why}"),
         }
     }
 }
@@ -86,9 +92,10 @@ pub enum Order {
     Max,
 }
 
-/// Whether touching `k` of `n` entries is cheaper via an `O(n)` rebuild than
-/// via `k` individual `O(log n)` updates.
+/// Whether changing `k` of `n` live entries is cheaper via a rebuild that
+/// costs `cost` (the number of leaves it must visit) than via `k` individual
+/// `O(log n)` updates.
 #[inline]
-pub(crate) fn prefer_rebuild(k: usize, n: usize) -> bool {
-    n > 1 && k.saturating_mul(n.ilog2() as usize) >= n
+pub(crate) fn prefer_rebuild(k: usize, n: usize, cost: usize) -> bool {
+    n > 1 && k.saturating_mul(n.ilog2() as usize) >= cost
 }

@@ -23,8 +23,8 @@ pub(crate) struct SharedHeap(std::cell::UnsafeCell<IndexedHeap>);
 // while holding the GIL. Closures passed to `with` only manipulate the Rust
 // heap: they neither run Python code nor release the GIL, so the GIL is held
 // continuously for the whole access and no other thread can access the heap
-// at the same time. PyO3 also refuses to load the module in sub-interpreters
-// (each with its own GIL).
+// at the same time. PyO3 refuses to load the module in sub-interpreters with
+// their own GIL; legacy sub-interpreters share the main GIL, so they are fine.
 #[cfg(not(Py_GIL_DISABLED))]
 unsafe impl Sync for SharedHeap {}
 
@@ -58,8 +58,8 @@ impl SharedHeap {
     /// cannot deadlock against the interpreter.
     #[inline(always)]
     pub(crate) fn with<R>(&self, f: impl FnOnce(&mut IndexedHeap) -> R) -> R {
-        // Heap operations do not panic on valid state, so a poisoned lock
-        // still guards a consistent heap.
+        // Heap operations do not panic on valid state, so even a poisoned lock
+        // (a panic surfaced as a Python exception) guards a consistent heap.
         let mut heap = self
             .0
             .lock()

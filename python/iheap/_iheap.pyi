@@ -1,4 +1,8 @@
-from typing import Any, final
+from collections.abc import Iterable
+from typing import Any, Final, SupportsIndex, final
+
+#: Largest number of handles a heap can issue.
+MAX_LEN: Final[int]
 
 @final
 class IndexedHeap:
@@ -12,7 +16,10 @@ class IndexedHeap:
     itself holds no Python objects.
 
     Priorities must be convertible to ``float`` and not NaN. Integers are
-    exact up to 2**53.
+    exact up to 2**53. Handles may be any int-like (``SupportsIndex``); one
+    that names no live entry, including negative or huge values, raises
+    ``KeyError``. Batch methods accept any iterable. Heaps pickle and copy
+    exactly, including which handles will be reused next.
 
     Thread safety: a heap may be shared between threads, including on
     free-threaded Python. Each call runs under an internal lock, so
@@ -21,6 +28,10 @@ class IndexedHeap:
     Args:
         reverse: If true, the largest priority is on top (max-heap).
         capacity: Number of entries to pre-allocate room for.
+
+    Raises:
+        ValueError: ``capacity`` is negative or above ``MAX_LEN``.
+        MemoryError: ``capacity`` entries cannot be allocated.
 
     Examples:
         >>> heap = IndexedHeap()
@@ -33,7 +44,7 @@ class IndexedHeap:
         True
     """
 
-    def __init__(self, *, reverse: bool = False, capacity: int = 0) -> None: ...
+    def __init__(self, *, reverse: object = False, capacity: SupportsIndex = 0) -> None: ...
     @property
     def reverse(self) -> bool:
         """``True`` for a max-heap."""
@@ -43,7 +54,7 @@ class IndexedHeap:
     def __len__(self) -> int:
         """Number of live entries."""
     def __bool__(self) -> bool: ...
-    def __contains__(self, handle: int) -> bool:
+    def __contains__(self, handle: SupportsIndex) -> bool:
         """Whether ``handle`` refers to a live entry."""
     def push(self, priority: float) -> int:
         """Insert an entry in ``O(log n)``.
@@ -58,7 +69,7 @@ class IndexedHeap:
             ValueError: ``priority`` is NaN.
             TypeError: ``priority`` is not convertible to ``float``.
         """
-    def push_many(self, priorities: list[float]) -> list[int]:
+    def push_many(self, priorities: Iterable[float]) -> list[int]:
         """Insert many entries at once.
 
         Large batches are appended and re-heapified in ``O(n)``. Atomic: if any
@@ -103,19 +114,19 @@ class IndexedHeap:
         Raises:
             ValueError: ``priority`` is NaN.
         """
-    def pop_many(self, n: int) -> list[tuple[int, float]]:
-        """Pop up to ``n`` entries.
+    def pop_many(self, n: SupportsIndex) -> list[tuple[int, float]]:
+        """Pop up to ``n`` entries (none if ``n <= 0``).
 
         Returns:
             ``(handle, priority)`` pairs in priority order.
         """
-    def priority(self, handle: int) -> float:
+    def priority(self, handle: SupportsIndex) -> float:
         """Return the priority of ``handle``.
 
         Raises:
             KeyError: ``handle`` is not live.
         """
-    def update(self, handle: int, priority: float) -> float:
+    def update(self, handle: SupportsIndex, priority: float) -> float:
         """Change the priority of ``handle`` in ``O(log n)``.
 
         Returns:
@@ -125,7 +136,7 @@ class IndexedHeap:
             KeyError: ``handle`` is not live.
             ValueError: ``priority`` is NaN.
         """
-    def update_many(self, handles: list[int], priorities: list[float]) -> None:
+    def update_many(self, handles: Iterable[SupportsIndex], priorities: Iterable[float]) -> None:
         """Change many priorities at once.
 
         Re-heapifies in ``O(n)`` when that is cheaper than individual updates.
@@ -136,7 +147,7 @@ class IndexedHeap:
             KeyError: A handle is not live.
             ValueError: The lists differ in length, or a priority is NaN.
         """
-    def remove(self, handle: int) -> float:
+    def remove(self, handle: SupportsIndex) -> float:
         """Remove ``handle`` in ``O(log n)``.
 
         Returns:
@@ -153,3 +164,4 @@ class IndexedHeap:
         """Return an independent copy, handles included."""
     def __copy__(self) -> IndexedHeap: ...
     def __deepcopy__(self, memo: Any) -> IndexedHeap: ...
+    def __reduce__(self) -> tuple[Any, ...]: ...

@@ -4,12 +4,13 @@ The native and float cores only order numbers. ``ObjectHeap`` orders any
 priorities that support ``<`` among themselves: strings, tuples (e.g.
 ``(priority, sequence)`` for FIFO ties), dates, ``Decimal`` exactly, and so
 on. It reuses the pure-Python heap, which only ever compares keys with ``<``
-and ``>=``; a max-heap wraps keys in :class:`_Reversed`, which inverts both.
-It runs at pure-Python speed.
+and ``>=`` and plans every sift before writing; a max-heap wraps keys in
+:class:`_Reversed`, which inverts both. It runs at pure-Python speed.
 """
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from ._pyheap import IndexedHeap as _PyHeap
@@ -30,6 +31,29 @@ class _Reversed:
         return not other.value < self.value
 
 
+class _ReentrancyGuard:
+    """A lock that raises instead of deadlocking when the thread holding it
+    re-enters: user ``__lt__`` methods run while the heap is locked, and one
+    that touches the same heap would otherwise hang (or corrupt it)."""
+
+    __slots__ = ("_lock", "_owner")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._owner: int | None = None
+
+    def __enter__(self) -> None:
+        me = threading.get_ident()
+        if self._owner == me:
+            raise RuntimeError("ObjectHeap used from within one of its own priority comparisons")
+        self._lock.acquire()
+        self._owner = me
+
+    def __exit__(self, *exc: object) -> None:
+        self._owner = None
+        self._lock.release()
+
+
 class ObjectHeap(_PyHeap):
     """Indexed heap whose priorities are any mutually comparable objects.
 
@@ -38,10 +62,14 @@ class ObjectHeap(_PyHeap):
     (not converted to ``float``) and ordered with ``<``. They must be totally
     ordered and comparable with each other.
 
+    Every operation is atomic: if comparing priorities raises (for example
+    ``(1, "a")`` against ``(1, 2)``), the exception propagates and the heap is
+    unchanged.
+
     Raises:
-        TypeError: A new priority cannot be compared with those in the heap
-            (checked against the current top before anything changes).
+        TypeError: Priorities cannot be compared with each other.
         ValueError: A priority is NaN-like (``p != p``).
+        RuntimeError: A priority comparison used the same heap.
 
     Examples:
         >>> heap = ObjectHeap()
@@ -57,6 +85,12 @@ class ObjectHeap(_PyHeap):
 
     __slots__ = ()
 
+    _COMPARISONS_MAY_RAISE = True
+
+    @staticmethod
+    def _new_lock() -> Any:
+        return _ReentrancyGuard()
+
     def _key(self, priority: Any) -> Any:
         if priority != priority:
             raise ValueError("priority must not be NaN")
@@ -64,17 +98,3 @@ class ObjectHeap(_PyHeap):
 
     def _decode(self, key: Any) -> Any:
         return key.value if self._sign < 0 else key
-
-    def _check(self, keys: list[Any]) -> None:
-        # Mixing incomparable types (say `str` and `int`) raises inside a
-        # sift, half-way through moving entries. Comparing every new key with
-        # a reference first (the current top, else the first new key) makes
-        # such operations fail with no effect.
-        if self._heap:
-            reference = self._keys[self._heap[0]]
-        elif keys:
-            reference = keys[0]
-        else:
-            return
-        for key in keys:
-            bool(key < reference)
