@@ -100,8 +100,9 @@ jobs:
       - id: deployment
         uses: actions/deploy-pages@v4
 
-  # abi3 wheels cannot load on free-threaded CPython, so those interpreters
-  # get version-specific cp3XXt wheels, built natively on each platform.
+  # abi3 wheels cannot load on free-threaded CPython, so it gets
+  # version-specific cp314t wheels, built natively on each platform. (PyO3
+  # supports free-threading from 3.14, where it is no longer experimental.)
   wheels-freethreaded:
     needs: test
     strategy:
@@ -118,11 +119,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - id: py313t
-        if: runner.os != 'Linux'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13t"
       - id: py314t
         if: runner.os != 'Linux'
         uses: actions/setup-python@v5
@@ -132,11 +128,11 @@ jobs:
         shell: bash
         run: |
           # Linux builds run in a manylinux/musllinux container that ships
-          # both free-threaded interpreters; elsewhere use setup-python's.
+          # the free-threaded interpreter; elsewhere use setup-python's.
           if [ "$RUNNER_OS" = Linux ]; then
-            echo "INTERPRETERS=-i python3.13t -i python3.14t" >> "$GITHUB_ENV"
+            echo "INTERPRETERS=-i python3.14t" >> "$GITHUB_ENV"
           else
-            echo "INTERPRETERS=-i ${{ steps.py313t.outputs.python-path }} -i ${{ steps.py314t.outputs.python-path }}" >> "$GITHUB_ENV"
+            echo "INTERPRETERS=-i ${{ steps.py314t.outputs.python-path }}" >> "$GITHUB_ENV"
           fi
       - uses: PyO3/maturin-action@v1
         with:

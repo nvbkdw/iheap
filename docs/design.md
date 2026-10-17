@@ -352,9 +352,9 @@ class), and the module is declared `gil_used = false`:
 - The lock is never held while Python code runs, because PyO3 converts all
   arguments before the method body takes it. So it can't deadlock against
   the interpreter. On GIL builds it costs nothing measurable.
-- On free-threaded CPython 3.13t/3.14t, importing `iheap` keeps the GIL
+- On free-threaded CPython 3.14t, importing `iheap` keeps the GIL
   disabled. Those interpreters can't load `abi3` wheels, so CI builds
-  dedicated `cp313t`/`cp314t` wheels.
+  dedicated `cp314t` wheels.
 - **`PQDict` is not safe for concurrent mutation.** Each of its operations
   takes several steps across a `dict`, two `list`s and the native heap. Guard
   a shared `PQDict` with a lock.

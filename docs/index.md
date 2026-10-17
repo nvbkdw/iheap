@@ -35,7 +35,7 @@ assert list(pq.popitems()) == [("a", -1), ("d", 0), ("b", 1)]
   raw handle-based [`IndexedHeap`][iheap.IndexedHeap] when you manage your
   own storage.
 - **Easy to install.** Prebuilt wheels for CPython ≥ 3.10 on Linux, macOS and
-  Windows, including free-threaded (no-GIL) 3.13t/3.14t. Typed (`py.typed`).
+  Windows, including free-threaded (no-GIL) 3.14t. Typed (`py.typed`).
 
 ## Install
 

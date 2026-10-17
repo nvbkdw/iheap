@@ -105,7 +105,7 @@ that stub in sync with `crates/iheap-py/src/lib.rs`.
 2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 3. CI tests on Linux, macOS and Windows (CPython 3.10, 3.14 and free-threaded
    3.14t). It builds `abi3` wheels for 7 platform targets, free-threaded
-   `cp313t`/`cp314t` wheels for the same targets (abi3 cannot load on
+   `cp314t` wheels for the same targets (abi3 cannot load on
    free-threaded CPython) and an sdist, then publishes them to PyPI through
    [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (no API
    token is stored).

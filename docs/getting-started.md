@@ -8,7 +8,7 @@ pip install iheap
 
 Wheels are published for CPython 3.10+ on Linux (x86_64/aarch64, glibc and
 musl), macOS (x86_64/arm64) and Windows (x64), including the free-threaded
-(no-GIL) builds of 3.13 and 3.14. On other platforms pip builds from source,
+(no-GIL) build of 3.14. On other platforms pip builds from source,
 which requires a [Rust toolchain](https://rustup.rs).
 
 ## The basics

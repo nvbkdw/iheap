@@ -24,7 +24,7 @@ getting-started guide, the API reference, the benchmark and development notes.
 
 Prebuilt wheels cover CPython ≥ 3.10 on Linux (glibc and musl, x86_64 and
 aarch64), macOS (x86_64 and arm64) and Windows (x64). That includes the
-free-threaded (no-GIL) builds of 3.13 and 3.14. `IndexedHeap` is safe to
+free-threaded (no-GIL) build of 3.14. `IndexedHeap` is safe to
 share between threads; guard a `PQDict` that several threads mutate with a
 lock.
 
