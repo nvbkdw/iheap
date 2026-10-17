@@ -14,7 +14,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 iheap-core = { path = "../iheap-core" }
-pyo3 = { version = "0.30", features = ["abi3-py310"] }
+# abi3-py311: one wheel per platform for every GIL-enabled CPython >= 3.11.
+# Free-threaded wheels add `--features pyo3/abi3t-py315` (one cp315-abi3t
+# wheel for 3.15t+) or are built version-specific (cp314t).
+pyo3 = { version = "0.30", features = ["abi3-py311"] }
 
 [build-dependencies]
 pyo3-build-config = "0.30"
