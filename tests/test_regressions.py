@@ -1,21 +1,17 @@
-"""Regression tests for issues found in the code review."""
+"""Regression tests for issues found in code review, and the binding's
+argument rules."""
 
 import math
 import pickle
 
 import pytest
 
-from iheap import ObjectHeap, PQDict
-from iheap._core import PythonIndexedHeap, heap_class
-
-BACKENDS = ["python"] + (["native"] if heap_class("auto") is not PythonIndexedHeap else [])
+from iheap import MAX_LEN, IndexedHeap, PQDict
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("priority_type", ["auto", "float", "object"])
-def test_failed_update_leaves_queue_usable(backend, priority_type):
+def test_failed_update_leaves_queue_usable():
     # A failed update() used to corrupt the free list, breaking the next push.
-    pq = PQDict({"a": 1, "b": 2}, backend=backend, priority_type=priority_type)
+    pq = PQDict({"a": 1, "b": 2})
     with pytest.raises(ValueError):
         pq.update({"c": 3, "d": 4, "a": math.nan})
     assert pq == {"a": 1, "b": 2}
@@ -23,46 +19,6 @@ def test_failed_update_leaves_queue_usable(backend, priority_type):
         pq[k] = v
     assert len(pq) == len(pq._heap) == 5
     assert list(pq.popkeys()) == ["f", "a", "b", "e", "g"]
-
-
-@pytest.mark.parametrize(
-    "op",
-    [
-        lambda h: h.push((1, 2)),
-        lambda h: h.update(0, (1, 3)),
-        lambda h: h.push_pop((1, 4)),
-        lambda h: h.push_many([(5, "ok"), (1, 9)]),
-    ],
-)
-def test_object_heap_is_atomic_when_comparisons_raise(op):
-    heap = ObjectHeap()
-    heap.push_many([(0, "x"), (1, "a"), (2, "b")])
-    before = heap.items()
-    with pytest.raises(TypeError):
-        op(heap)
-    assert heap.items() == before
-    assert heap.pop() == (0, (0, "x"))  # still consistent
-
-
-def test_object_heap_detects_reentrant_comparisons():
-    class Reentrant:
-        def __init__(self, heap):
-            self.heap = heap
-
-        def __lt__(self, other):
-            self.heap.push(1)
-            return False
-
-        __ge__ = __lt__
-
-        def __ne__(self, other):
-            return False
-
-    heap = ObjectHeap()
-    heap.push(Reentrant(heap))
-    with pytest.raises(RuntimeError):
-        heap.push(Reentrant(heap))
-    assert len(heap) == 1
 
 
 def test_bulk_load_tolerates_reentrant_key_function():
@@ -87,14 +43,36 @@ def test_replace_key_with_itself_is_a_no_op():
         pq.replace_key("missing", "missing")
 
 
-@pytest.mark.parametrize("cls", [heap_class(b) for b in BACKENDS] + [ObjectHeap])
-def test_heaps_pickle_exactly(cls):
-    heap = cls(reverse=True)
+def test_heap_pickles_exactly():
+    heap = IndexedHeap(reverse=True)
     heap.push_many([3, 1, 2, 5])
     heap.remove(1)
     heap.pop()
     clone = pickle.loads(pickle.dumps(heap))
-    assert type(clone) is cls and clone.reverse
-    assert clone.items() == heap.items() and clone.handle_bound == heap.handle_bound
+    assert clone.reverse and clone.items() == heap.items()
+    assert clone.handle_bound == heap.handle_bound
     assert clone.push(9) == heap.push(9)  # same handle reuse
     assert clone.pop_many(9) == heap.pop_many(9)
+
+
+def test_handle_and_batch_argument_rules():
+    heap = IndexedHeap()
+    heap.push_many(x for x in [3.0, 1.0])  # any iterable
+    heap.update_many(iter([0]), (p for p in [5.0]))
+    assert heap.items() == [(0, 5.0), (1, 1.0)]
+    for bad_handle in (-1, 2**70, 99):
+        with pytest.raises(KeyError):
+            heap.priority(bad_handle)
+        assert bad_handle not in heap
+    with pytest.raises(TypeError):
+        heap.priority("0")
+    assert heap.pop_many(-3) == []
+    with pytest.raises(ValueError):
+        heap.update(99, math.nan)  # priority errors take precedence
+
+
+def test_constructor_argument_rules():
+    assert IndexedHeap(reverse=1).reverse and not IndexedHeap(reverse=0).reverse
+    for bad in (-1, MAX_LEN + 1):
+        with pytest.raises(ValueError):
+            IndexedHeap(capacity=bad)

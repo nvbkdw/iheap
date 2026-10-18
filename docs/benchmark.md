@@ -26,37 +26,35 @@ disabled while timing.
 
 ## Results
 
-Apple M4 Max, CPython 3.13.7, iheap 0.3.0. Each cell is **ns per operation,
-lower is better**, with the speed-up over `pqdict` in parentheses. `PQDict`
-runs with the default `priority_type="auto"`; `priority_type="float"` skips
-the exactness check and saves another 20–50 ns per single update.
+Apple M4 Max, CPython 3.13.7, iheap 0.4.0. Each cell is **ns per operation,
+lower is better**, with the speed-up over `pqdict` in parentheses.
 
 === "n = 10,000"
 
     | implementation | insert | build | update | delete | pop |
     |---|---:|---:|---:|---:|---:|
-    | iheap.PQDict | 239 (2.2x) | 60 (9.0x) | 153 (5.5x) | 134 (5.5x) | 141 (15.6x) |
-    | iheap.IndexedHeap | 58 (8.9x) | 37 (14.5x) | 59 (14.3x) | 71 (10.4x) | 89 (24.7x) |
-    | pqdict | 518 | 540 | 843 | 744 | 2,201 |
-    | heapq (lazy) | 184 (2.8x) | 109 (5.0x) | 199 (4.2x) | 75 (10.0x) | 383 (5.7x) |
+    | iheap.PQDict | 156 (3.4x) | 44 (12.3x) | 135 (6.3x) | 144 (5.2x) | 146 (15.3x) |
+    | iheap.IndexedHeap | 60 (8.8x) | 39 (13.9x) | 60 (14.1x) | 80 (9.3x) | 90 (24.5x) |
+    | pqdict | 527 | 542 | 844 | 748 | 2,219 |
+    | heapq (lazy) | 185 (2.9x) | 107 (5.1x) | 213 (4.0x) | 82 (9.1x) | 383 (5.8x) |
 
 === "n = 100,000"
 
     | implementation | insert | build | update | delete | pop |
     |---|---:|---:|---:|---:|---:|
-    | iheap.PQDict | 190 (3.0x) | 58 (10.4x) | 236 (6.3x) | 231 (5.1x) | 226 (16.1x) |
-    | iheap.IndexedHeap | 70 (8.1x) | 50 (12.1x) | 92 (16.1x) | 125 (9.4x) | 124 (29.4x) |
-    | pqdict | 570 | 603 | 1,475 | 1,177 | 3,637 |
-    | heapq (lazy) | 218 (2.6x) | 134 (4.5x) | 411 (3.6x) | 198 (5.9x) | 867 (4.2x) |
+    | iheap.PQDict | 184 (3.1x) | 56 (11.2x) | 270 (4.6x) | 260 (4.3x) | 235 (15.2x) |
+    | iheap.IndexedHeap | 75 (7.7x) | 51 (12.4x) | 106 (11.7x) | 137 (8.2x) | 151 (23.6x) |
+    | pqdict | 578 | 627 | 1,244 | 1,118 | 3,564 |
+    | heapq (lazy) | 228 (2.5x) | 144 (4.4x) | 398 (3.1x) | 199 (5.6x) | 920 (3.9x) |
 
 === "n = 1,000,000"
 
     | implementation | insert | build | update | delete | pop |
     |---|---:|---:|---:|---:|---:|
-    | iheap.PQDict | 285 (2.6x) | 97 (9.3x) | 690 (3.8x) | 761 (3.3x) | 739 (11.7x) |
-    | iheap.IndexedHeap | 148 (5.0x) | 85 (10.6x) | 423 (6.3x) | 498 (5.0x) | 605 (14.3x) |
-    | pqdict | 733 | 903 | 2,646 | 2,511 | 8,645 |
-    | heapq (lazy) | 375 (2.0x) | 265 (3.4x) | 885 (3.0x) | 623 (4.0x) | 2,423 (3.6x) |
+    | iheap.PQDict | 232 (3.1x) | 83 (10.6x) | 611 (4.2x) | 724 (3.3x) | 689 (11.9x) |
+    | iheap.IndexedHeap | 134 (5.4x) | 80 (11.1x) | 412 (6.2x) | 453 (5.2x) | 548 (14.9x) |
+    | pqdict | 722 | 882 | 2,560 | 2,355 | 8,188 |
+    | heapq (lazy) | 330 (2.2x) | 227 (3.9x) | 796 (3.2x) | 578 (4.1x) | 2,271 (3.6x) |
 
 ### Rust core alone
 
@@ -74,14 +72,6 @@ operation, speed-up in parentheses):
 
 From n = 100k up, the geometric mean over the five operations is a **2.1×**
 speed-up; at n = 10k, where everything fits in cache, it is 1.5×.
-
-### Pure-Python fallback core
-
-Where no native wheel fits (for example CPython 3.13t or PyPy), the
-pure-Python core is used. With `IHEAP_BACKEND=python` on the same machine, it
-runs at pure-Python speed: roughly on par with `pqdict` (0.7–1.7×) and about
-10× slower than the native core. It exists so the library works everywhere,
-not for speed.
 
 ## Where the time goes
 
@@ -135,9 +125,7 @@ the measurement that decided it.
 | `ld1`+`uzp` vs `ld2` to split nodes | no change | kept `ld2` (fewer instructions) |
 | Rebuild and `clear` proportional to `handle_bound` instead of capacity | small batches on a large allocation: milliseconds → microseconds | kept |
 | `panic = "unwind"` instead of `"abort"` | +2–3 ns per call | kept: a bug raises an exception instead of killing the interpreter |
-| `int`-like handles and any-iterable batches in the binding | +~2 ns per call | kept: identical argument rules on every core |
-| `priority_type="auto"` exactness check in `PQDict` | +20–50 ns per single update, +7–15 ns per item in bulk | kept as the default for exact ordering; `"float"` skips it |
-| Plan-then-apply sifts (exception safety) in the pure float core | ~40% slower fallback | moved to `ObjectHeap` only, where comparisons can raise |
+| `int`-like handles and any-iterable batches in the binding | +~2 ns per call | kept: Pythonic argument rules |
 
 On x86-64 the reductions use the branch-free scalar path, because SSE2 has no
 64-bit integer compare. Only aarch64 was measured.

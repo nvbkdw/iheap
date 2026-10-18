@@ -46,12 +46,8 @@ crates/iheap-core/     pure-Rust core: no PyO3
   examples/bench.rs    core-only micro-benchmark
 crates/iheap-py/       thin PyO3 binding -> iheap._iheap (abi3-py310; free-threading safe)
 python/iheap/          Python package
-  _core.py             backends: native extension or pure Python (IHEAP_BACKEND)
-  _pyheap.py           pure-Python IndexedHeap (fallback, same API)
-  _objheap.py          ObjectHeap: arbitrary comparable priorities
-  _pqdict.py           PQDict mapping API, priority_type selection
+  _pqdict.py           PQDict mapping API
   _iheap.pyi           type stub + docs for the native module
-scripts/make_pure_wheel.py   derives the py3-none-any fallback wheel
 tests/                 pytest suite (incl. differential tests vs dict and pqdict)
 benchmarks/bench.py    end-to-end benchmark
 docs/ + mkdocs.yml     this documentation
@@ -79,7 +75,6 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test -p iheap-core          # Rust: unit tests + randomized model test
 pytest                            # Python: tests/, doctests, docs code blocks
-IHEAP_BACKEND=python pytest       # the same suite against the pure-Python core
 ```
 
 The pytest suite includes:
@@ -111,19 +106,18 @@ that stub in sync with `crates/iheap-py/src/lib.rs`.
 3. CI then runs, in order:
    - **Rust:** fmt, clippy, tests, an MSRV (1.88) check, and the core's tests
      on i686, armv7, s390x and ppc64le under emulation.
-   - **Python from source:** CPython 3.11–3.15, 3.14t and 3.15t on Linux, and
-     3.11/3.15/3.15t on macOS and Windows, each against both the native and
-     the pure-Python core.
+   - **Python from source:** CPython 3.11–3.15, 3.14t, 3.15t and PyPy 3.11 on
+     Linux, and 3.11/3.15/3.15t on macOS and Windows.
    - **Wheels:**
      - `cp311-abi3` for 15 targets: Linux glibc (x86_64, i686, aarch64,
        armv7, ppc64le, s390x), Linux musl (x86_64, i686, aarch64, armv7),
        Windows (x64, x86, arm64), macOS (x86_64, arm64);
      - free-threaded `cp314t` and `cp315-abi3t` for the 64-bit targets;
-     - the pure `py3-none-any` wheel and the sdist.
+     - PyPy `pp311` for Linux x86_64/aarch64, macOS and Windows x64;
+     - the sdist.
    - **Testing what ships:** every wheel is installed the way pip would choose
      it and the suite is run, natively, under QEMU for the other
-     architectures, and on CPython 3.13t and PyPy for the pure wheel. The
-     sdist is built from source and tested.
+     architectures, and on PyPy. The sdist is built from source and tested.
    - **Publishing:** only if all of that passes, and only if the tag matches
      the package version, everything goes to PyPI through
      [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (no API

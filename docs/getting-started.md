@@ -6,15 +6,15 @@
 pip install iheap
 ```
 
-iheap supports CPython 3.11 and later, and every platform Python runs on.
-pip picks the best implementation for your interpreter automatically:
+iheap supports CPython 3.11 and later. Every queue runs on the native Rust
+core; pip picks the right wheel for your interpreter:
 
-| Interpreter | Wheel | Core |
+| Interpreter | Wheel | Synchronization |
 |---|---|---|
-| CPython 3.11+ (regular, with the GIL) | `cp311-abi3` | native Rust, GIL-specialized: no locking at all |
-| CPython 3.14t (free-threaded) | `cp314t` | native Rust with a mutex per heap |
-| CPython 3.15t and later (free-threaded) | `cp315-abi3t` | native Rust with a mutex per heap |
-| CPython 3.13t, PyPy, GraalPy, Pyodide, other platforms | `py3-none-any` | pure Python, same API |
+| CPython 3.11+ (regular, with the GIL) | `cp311-abi3` | none needed: the GIL is the lock |
+| CPython 3.14t (free-threaded) | `cp314t` | a mutex per heap |
+| CPython 3.15t and later (free-threaded) | `cp315-abi3t` | a mutex per heap |
+| PyPy 3.11 | `pp311` | the GIL |
 
 Native wheels cover:
 
@@ -23,33 +23,10 @@ Native wheels cover:
 - **macOS**: x86_64 and arm64;
 - **Windows**: x64, x86 and arm64.
 
-Free-threaded wheels are built for the 64-bit targets. The pure-Python core
-behaves identically, but runs at pure-Python speed, comparable to `pqdict`.
-To build the native core from source on a platform without a native wheel,
-use `pip install --no-binary iheap iheap`, which needs Rust 1.88 or later.
-
-### Choosing the implementation yourself
-
-The defaults are right for almost everyone. When you need control:
-
-```python
-import iheap
-from iheap import PQDict
-
-print(iheap.NATIVE)                # True when the Rust core is the default
-pq = PQDict({"a": 1}, backend="python")
-assert pq.core == "python"         # "native", "python" or "object"
-```
-
-| Setting | Values | Effect |
-|---|---|---|
-| `IHEAP_BACKEND` environment variable | `auto` (default), `native`, `python` | process-wide default for numeric priorities |
-| `backend=` argument (`PQDict`, `nsmallest`, `nlargest`) | `None` (use the default), `"auto"`, `"native"`, `"python"` | per queue; `"native"` raises `ImportError` if no native core is installed |
-| `priority_type=` argument | `"auto"` (default), `"float"`, `"object"` | which priorities a queue accepts; see [String and other priorities](#string-and-other-priorities) |
-
-The older `IHEAP_PURE_PYTHON=1` still works and means `IHEAP_BACKEND=python`.
-An invalid `IHEAP_BACKEND` value makes `import iheap` fail with a clear error
-rather than silently picking a core.
+Free-threaded and PyPy wheels are built for the 64-bit targets. On any other
+platform pip builds the extension from the source package, which needs Rust
+1.88 or later. Free-threaded CPython 3.13 is not supported: the Rust bindings
+support free-threading from 3.14, where it stopped being experimental.
 
 ## The basics
 
@@ -140,47 +117,6 @@ tasks.heapify("deploy")             # re-prioritize one item in O(log n)
 tasks.heapify()                     # ... or every item in O(n)
 ```
 
-## String and other priorities
-
-Priorities can be any objects that support `<`: numbers, strings, tuples,
-dates, exact `Decimal`s, integers of any size. You don't need to say which:
-
-```python
-from datetime import date
-
-words = PQDict({"x": "pear", "y": "apple", "z": "fig"})
-assert list(words.popkeys()) == ["y", "z", "x"]
-
-due = PQDict(reverse=True)                            # latest date first
-due.update({"tax": date(2026, 4, 15), "rent": date(2026, 11, 1)})
-assert due.top() == "rent"
-
-# Tuples make ties deterministic: equal priority -> smaller sequence number first.
-fifo = PQDict(key=lambda name, item: (item[0], item[1]))
-fifo.update({"b": (1, 0), "a": (1, 1), "c": (0, 2)})
-assert list(fifo.popkeys()) == ["c", "b", "a"]
-```
-
-How it works: with the default `priority_type="auto"`, a queue runs on the
-fast Rust core as long as every priority is a number that a `float`
-represents exactly. The first time a priority isn't (a `str`, a `tuple`, a
-`date`, an `int` beyond 2⁵³, an inexact `Decimal`), the queue moves to the
-pure-Python object core, once, in `O(n)`, keeping all items. Order is then
-exact, but speed is pure-Python, about the same as `pqdict`. `pq.core`
-reports which core holds a queue.
-
-```python
-big = PQDict({"a": 2**60, "b": 2**60 + 1})   # 2**60 + 1 is not an exact float
-assert big.core == "object" and big.top() == "a"
-```
-
-To pin the behavior, pass `priority_type="float"` (numeric core only;
-anything else raises `TypeError`; this also skips the exactness check, for
-maximum speed) or `priority_type="object"` (always the object core, which
-[`ObjectHeap`][iheap.ObjectHeap] exposes directly). Priorities in one queue
-must be comparable with each other. A priority that isn't (say, a `str` in a
-queue of numbers) raises `TypeError` and leaves the queue unchanged.
-
 ## It is a full `dict`
 
 Every `dict` operation works, and iteration follows **insertion order**,
@@ -222,8 +158,8 @@ pq.swap_priority("b", "c")         # exchange two items' values in O(1)
 assert pq == {"b": 8, "c": 7, "E": 6}
 ```
 
-For one-off selection, use [`nsmallest`][iheap.nsmallest] and
-[`nlargest`][iheap.nlargest]. They run in native code for numeric priorities:
+For one-off selection, [`nsmallest`][iheap.nsmallest] and
+[`nlargest`][iheap.nlargest] run in native code:
 
 ```python
 from iheap import nlargest, nsmallest
@@ -300,22 +236,22 @@ is the fastest way to store data alongside them.
 
 ## Things to know
 
-- **Priorities.** Numbers of any kind work (`int`, `float`, `Decimal`,
-  `Fraction`, numpy scalars), and so does anything else that supports `<`
-  (see [String and other priorities](#string-and-other-priorities)). Order is
-  always exact: big integers and inexact decimals move a queue to the object
-  core rather than being rounded. NaN raises `ValueError`, and incomparable
-  priorities raise `TypeError`; the queue is left unchanged in both cases.
+- **Priorities are numbers.** Any value that `float()` accepts works (`int`,
+  `float`, `Decimal`, `Fraction`, numpy scalars), except `str`. Priorities
+  are stored as `float`, so integers are exact up to 2⁵³. NaN raises
+  `ValueError`, and non-numbers raise `TypeError`; the queue is left
+  unchanged in both cases.
 - **Ties** are popped in unspecified order. To get FIFO order among equal
-  priorities, use a tuple priority such as `(priority, sequence_number)`.
+  priorities, add a tiny increasing tie-breaker, such as
+  `priority + sequence_number * 1e-9` (choose a scale below your priorities'
+  resolution).
 - **Bulk operations are faster.** `PQDict(data)` and `pq.update(many_items)`
   build in `O(n)` with one native call, which beats inserting in a loop.
 - **Every operation is atomic.** If an operation raises, whether from a bad
-  priority, a key function or a comparison, the queue is unchanged.
-- **Thread safety.** [`IndexedHeap`][iheap.IndexedHeap] and
-  [`ObjectHeap`][iheap.ObjectHeap] can be shared between threads: concurrent
-  calls on one heap are serialized (by the GIL on regular builds; by a lock
-  per heap on free-threaded Python and in the pure-Python cores). On
+  priority or from a key function, the queue is unchanged.
+- **Thread safety.** [`IndexedHeap`][iheap.IndexedHeap] can be shared
+  between threads: concurrent calls on one heap are serialized (by the GIL on
+  regular builds; by a lock per heap on free-threaded Python). On
   free-threaded Python, importing `iheap` keeps the GIL disabled. Compound
   sequences, such as `peek` then `update`, still need your own lock to be
   atomic. **`PQDict` is not safe for concurrent mutation**: each of its

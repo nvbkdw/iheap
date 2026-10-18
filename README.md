@@ -30,14 +30,12 @@ implementation for your interpreter automatically:
 | CPython ≥ 3.11 with the GIL | native Rust (`cp311-abi3` wheel), lock-free: the GIL is the lock |
 | CPython 3.14t, free-threaded | native Rust (`cp314t` wheel), mutex per heap |
 | CPython 3.15t+, free-threaded | native Rust (`cp315-abi3t` wheel), mutex per heap |
-| CPython 3.13t, PyPy, GraalPy, Pyodide, … | pure Python (`py3-none-any` wheel), same API |
+| PyPy 3.11 | native Rust (`pp311` wheel) |
 
 Native wheels cover Linux glibc (x86_64, i686, aarch64, armv7, ppc64le,
 s390x), Linux musl (x86_64, i686, aarch64, armv7), macOS (x86_64, arm64) and
-Windows (x64, x86, arm64). `iheap.NATIVE` tells you whether the Rust core is
-the default, and `pq.core` which core a queue uses. Override the choice with
-`IHEAP_BACKEND=auto|native|python` or `PQDict(..., backend=...)`.
-`IndexedHeap` is safe to share between threads; guard a `PQDict` that several
+Windows (x64, x86, arm64). Elsewhere pip builds the extension from source
+(Rust ≥ 1.88). Free-threaded CPython 3.13 is not supported. `IndexedHeap` is safe to share between threads; guard a `PQDict` that several
 threads mutate with a lock.
 
 ## Design
@@ -85,18 +83,15 @@ values (the payload) never leave Python.
 
 ## API
 
-### `PQDict(data=None, *, key=None, reverse=False, priority_type="auto", backend=None)`
+### `PQDict(data=None, *, key=None, reverse=False)`
 
 A `MutableMapping` whose items are ordered by priority. The priority is
 `key(item_key, value)` if a `key` function is given, otherwise the value itself.
 `reverse=True` makes it a max-queue. Ties are popped in unspecified order.
 
-Priorities can be numbers or any objects that support `<` (strings, tuples,
-dates, …). With `priority_type="auto"` a queue runs on the Rust core while
-every priority is exactly representable as a `float`, and moves once to the
-pure-Python object core otherwise, so ordering is always exact. Pin
-`priority_type="float"` (numeric only; fastest) or `"object"`. `backend`
-chooses the numeric core: `"auto"`, `"native"` or `"python"`.
+Priorities are numbers (anything `float()` accepts except `str`), stored as
+`float`: integers are exact up to 2⁵³. NaN raises `ValueError` and
+non-numbers raise `TypeError`, leaving the queue unchanged.
 
 `PQDict` supports **every `dict` operation**: `pq[k]`, `pq[k] = v`,
 `del pq[k]`, `k in pq`, `len`, `iter`, `reversed`, `get`, `setdefault`,
@@ -118,19 +113,13 @@ inserted.
 | `heapify(key=None)` | re-prioritize after a value was mutated in place |
 | `update(mapping)` | bulk insert/update with one native call (atomic) |
 | `copy()`, pickling, `fromkeys()` | |
-| `core` | `"native"`, `"python"` or `"object"`: the core in use right now |
 
-Module functions: `minpq(**kw)`, `maxpq(**kw)`,
-`nsmallest(n, mapping, key=None, priority_type="auto", backend=None)`,
-`nlargest(...)` (same arguments), `heap_class(backend)`.
-
-`ObjectHeap(*, reverse=False)` is the low-level heap for arbitrary comparable
-priorities, with the same API as `IndexedHeap`.
+Module functions: `minpq(**kw)`, `maxpq(**kw)`, `nsmallest(n, mapping, key=None)`,
+`nlargest(n, mapping, key=None)`.
 
 Differences from `pqdict`:
 
-- priorities that aren't exact floats (strings, tuples, big integers, …) are
-  handled by a pure-Python core, and numbers by the Rust core, automatically;
+- priorities must be numbers (stored as `float`);
 - the custom comparator `precedes=` is replaced by `reverse=`;
 - the `key` function receives the item's key as well as its value,
   `key(item_key, value)`. To port `key=f`, write `key=lambda k, v: f(v)`.
@@ -177,36 +166,35 @@ Implementations compared:
   Python docs. Its update and delete are cheap because they defer the work
   to pop.
 
-Results on Apple M4 Max, CPython 3.13.7, iheap 0.3.0. Each cell is **ns per
+Results on Apple M4 Max, CPython 3.13.7, iheap 0.4.0. Each cell is **ns per
 operation, lower is better**, with the speed-up over `pqdict` in parentheses.
-`PQDict` runs with the default `priority_type="auto"`.
 
 **n = 10,000**
 
 | implementation | insert | build | update | delete | pop |
 |---|---:|---:|---:|---:|---:|
-| iheap.PQDict | 239 (2.2x) | 60 (9.0x) | 153 (5.5x) | 134 (5.5x) | 141 (15.6x) |
-| iheap.IndexedHeap | 58 (8.9x) | 37 (14.5x) | 59 (14.3x) | 71 (10.4x) | 89 (24.7x) |
-| pqdict | 518 | 540 | 843 | 744 | 2,201 |
-| heapq (lazy) | 184 (2.8x) | 109 (5.0x) | 199 (4.2x) | 75 (10.0x) | 383 (5.7x) |
+| iheap.PQDict | 156 (3.4x) | 44 (12.3x) | 135 (6.3x) | 144 (5.2x) | 146 (15.3x) |
+| iheap.IndexedHeap | 60 (8.8x) | 39 (13.9x) | 60 (14.1x) | 80 (9.3x) | 90 (24.5x) |
+| pqdict | 527 | 542 | 844 | 748 | 2,219 |
+| heapq (lazy) | 185 (2.9x) | 107 (5.1x) | 213 (4.0x) | 82 (9.1x) | 383 (5.8x) |
 
 **n = 100,000**
 
 | implementation | insert | build | update | delete | pop |
 |---|---:|---:|---:|---:|---:|
-| iheap.PQDict | 190 (3.0x) | 58 (10.4x) | 236 (6.3x) | 231 (5.1x) | 226 (16.1x) |
-| iheap.IndexedHeap | 70 (8.1x) | 50 (12.1x) | 92 (16.1x) | 125 (9.4x) | 124 (29.4x) |
-| pqdict | 570 | 603 | 1,475 | 1,177 | 3,637 |
-| heapq (lazy) | 218 (2.6x) | 134 (4.5x) | 411 (3.6x) | 198 (5.9x) | 867 (4.2x) |
+| iheap.PQDict | 184 (3.1x) | 56 (11.2x) | 270 (4.6x) | 260 (4.3x) | 235 (15.2x) |
+| iheap.IndexedHeap | 75 (7.7x) | 51 (12.4x) | 106 (11.7x) | 137 (8.2x) | 151 (23.6x) |
+| pqdict | 578 | 627 | 1,244 | 1,118 | 3,564 |
+| heapq (lazy) | 228 (2.5x) | 144 (4.4x) | 398 (3.1x) | 199 (5.6x) | 920 (3.9x) |
 
 **n = 1,000,000**
 
 | implementation | insert | build | update | delete | pop |
 |---|---:|---:|---:|---:|---:|
-| iheap.PQDict | 285 (2.6x) | 97 (9.3x) | 690 (3.8x) | 761 (3.3x) | 739 (11.7x) |
-| iheap.IndexedHeap | 148 (5.0x) | 85 (10.6x) | 423 (6.3x) | 498 (5.0x) | 605 (14.3x) |
-| pqdict | 733 | 903 | 2,646 | 2,511 | 8,645 |
-| heapq (lazy) | 375 (2.0x) | 265 (3.4x) | 885 (3.0x) | 623 (4.0x) | 2,423 (3.6x) |
+| iheap.PQDict | 232 (3.1x) | 83 (10.6x) | 611 (4.2x) | 724 (3.3x) | 689 (11.9x) |
+| iheap.IndexedHeap | 134 (5.4x) | 80 (11.1x) | 412 (6.2x) | 453 (5.2x) | 548 (14.9x) |
+| pqdict | 722 | 882 | 2,560 | 2,355 | 8,188 |
+| heapq (lazy) | 330 (2.2x) | 227 (3.9x) | 796 (3.2x) | 578 (4.1x) | 2,271 (3.6x) |
 
 ### The Rust core alone
 

@@ -67,7 +67,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python: ["3.11", "3.12", "3.13", "3.14", "3.15", "3.14t", "3.15t"]
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15", "3.14t", "3.15t", "pypy3.11"]
         include:
           - { os: macos-latest, python: "3.11" }
           - { os: macos-latest, python: "3.15" }
@@ -86,7 +86,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Build and test both cores
+      - name: Build and test
         shell: bash
         run: |
           python -m venv .venv
@@ -95,7 +95,6 @@ jobs:
           pip install --group dev
           maturin develop --release
           pytest -q
-          IHEAP_BACKEND=python pytest -q   # the pure-Python core
 
   docs:
     runs-on: ubuntu-latest
@@ -238,26 +237,44 @@ jobs:
           name: wheels-ft${{ matrix.python }}-${{ matrix.platform.os }}-${{ matrix.platform.target }}-${{ matrix.platform.manylinux || 'native' }}
           path: dist
 
-  # Pure-Python fallback for interpreters no native wheel fits (CPython 3.13t,
-  # PyPy, other platforms): a platform wheel minus the extension.
-  wheel-pure:
-    needs: wheels
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  # PyPy cannot load CPython's abi3 wheels: version-specific pp311 wheels.
+  wheels-pypy:
+    needs: [rust, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { os: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: auto }
+          - { os: macos-15-intel, target: x86_64 }
+          - { os: macos-14, target: aarch64 }
+          - { os: windows-latest, target: x64 }
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { persist-credentials: false }
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - id: py
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.13"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+          python-version: pypy3.11
+      - name: Select interpreter
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            echo "INTERPRETER=pypy3.11" >> "$GITHUB_ENV"   # in the manylinux container
+          else
+            echo "INTERPRETER=${{ steps.py.outputs.python-path }}" >> "$GITHUB_ENV"
+          fi
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
-          name: wheels-abi3-ubuntu-latest-x86_64-auto
-          path: native
-      - run: python scripts/make_pure_wheel.py native/*.whl dist
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --out dist -i ${{ env.INTERPRETER }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: wheels-pure
+          name: wheels-pypy-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist
 
   sdist:
@@ -294,11 +311,11 @@ jobs:
         run: |
           pip install dist/*.tar.gz pytest pqdict
           mkdir src && tar xzf dist/*.tar.gz -C src --strip-components 1
-          cd src && python -c "import iheap; assert iheap.NATIVE" && python -m pytest -q tests
+          cd src && python -m pytest -q tests
 
   # Native runners: let pip choose among all built wheels, then test.
   test-wheels:
-    needs: [wheels, wheels-freethreaded, wheel-pure]
+    needs: [wheels, wheels-freethreaded, wheels-pypy]
     strategy:
       fail-fast: false
       matrix:
@@ -317,11 +334,9 @@ jobs:
           - { os: windows-latest, python: "3.15t" }
           - { os: windows-latest, python: "3.13", arch: x86 }
           - { os: windows-11-arm, python: "3.13" }
-          # No native wheel fits these: the pure-Python wheel must be chosen.
-          - { os: ubuntu-latest, python: "3.13t", pure: true }
-          - { os: macos-14, python: "3.13t", pure: true }
-          - { os: windows-latest, python: "3.13t", pure: true }
-          - { os: ubuntu-latest, python: "pypy3.11", pure: true }
+          - { os: ubuntu-latest, python: "pypy3.11" }
+          - { os: macos-14, python: "pypy3.11" }
+          - { os: windows-latest, python: "pypy3.11" }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -342,8 +357,7 @@ jobs:
           rm -f dist/*.tar.gz
           python -m pip install pytest pqdict
           python -m pip install --no-index --find-links dist iheap
-          python -c "import iheap, sys; print(sys.version, '->', 'native' if iheap.NATIVE else 'pure')"
-          python -c "import iheap; assert iheap.NATIVE == ('${{ matrix.pure }}' != 'true')"
+          python -c "import iheap, sys; print(sys.version, '->', iheap._iheap.__file__)"
           python -m pytest -q tests
 
   # Other architectures: test the wheels under QEMU emulation.
@@ -376,7 +390,7 @@ jobs:
             set -e
             pip install -q pytest pqdict
             pip install -q --no-index --find-links dist iheap
-            python -c "import iheap, platform; print(platform.machine()); assert iheap.NATIVE"
+            python -c "import iheap, platform; print(platform.machine(), iheap.__version__)"
             python -m pytest -q tests'
 
   # ----------------------------------------------------------------- publish

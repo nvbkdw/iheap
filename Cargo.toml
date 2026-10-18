@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/iheap-core", "crates/iheap-py"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/nvbkdw/iheap"

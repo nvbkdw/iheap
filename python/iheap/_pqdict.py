@@ -8,21 +8,14 @@ module owns everything else:
 
 Handles are dense and recycled by the heap, so the two lists never grow beyond
 the peak queue size.
-
-Which heap holds the priorities depends on ``priority_type`` and ``backend``:
-numeric priorities go to the native core (or its pure-Python twin), anything
-else to :class:`ObjectHeap`. With ``priority_type="auto"`` (the default) a
-queue starts on the numeric core and moves to ``ObjectHeap`` once, the first
-time a priority cannot be represented exactly as a ``float``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, MutableMapping
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, TypeVar
 
-from ._core import Backend, NativeIndexedHeap, heap_class
-from ._objheap import ObjectHeap
+from ._iheap import IndexedHeap
 
 K = TypeVar("K", bound=Hashable)
 V = TypeVar("V")
@@ -30,73 +23,7 @@ V = TypeVar("V")
 _MISSING: Any = object()
 
 #: Priority function: maps an item's key and value to its priority.
-PriorityFn = Callable[[K, V], object]
-
-#: ``"auto"``: numeric core while priorities are exact floats, else generic.
-#: ``"float"``: numeric core only. ``"object"``: generic core only.
-PriorityType = Literal["auto", "float", "object"]
-PRIORITY_TYPES: tuple[PriorityType, ...] = ("auto", "float", "object")
-
-_EXACT_INT = 2**53  # every int of at most this magnitude is an exact float
-
-
-def _exact(priority: Any) -> bool:
-    """Whether the numeric core represents ``priority`` exactly.
-
-    ``float(p) == p`` compares exactly for ``int``, ``Decimal`` and
-    ``Fraction``, so it catches big integers and inexact decimals. NaN-likes
-    count as exact: the numeric core rejects them with ``ValueError``.
-    """
-    t = type(priority)
-    if t is float or (t is int and -_EXACT_INT <= priority <= _EXACT_INT):
-        return True
-    if isinstance(priority, (str, bytes, bytearray)):
-        return False
-    try:
-        value = float(priority)
-    except (TypeError, ValueError, OverflowError):
-        return False
-    return value == priority or value != value
-
-
-_INT_TYPES = frozenset({int, bool})
-_FLOAT_INT_TYPES = frozenset({float, int, bool})
-
-
-def _all_exact(priorities: Iterable[Any]) -> bool:
-    """``all(map(_exact, priorities))``, without a Python call per item for
-    the common all-float / bounded-int batches (C-level type set, min, max)."""
-    if not isinstance(priorities, (list, tuple)):
-        priorities = list(priorities)
-    if not priorities:
-        return True
-    types = set(map(type, priorities))
-    if types == {float}:
-        return True
-    if types <= _FLOAT_INT_TYPES:
-        if types & _INT_TYPES:
-            try:
-                low, high = min(priorities), max(priorities)
-            except (TypeError, ValueError):  # NaN-induced oddities: check one by one
-                return all(map(_exact, priorities))
-            # Floats are exact at any magnitude; a NaN makes min/max unreliable,
-            # so only trust the bounds when both are ordinary numbers.
-            if low == low and high == high and -_EXACT_INT <= low and high <= _EXACT_INT:
-                return True
-        else:
-            return True
-    return all(map(_exact, priorities))
-
-
-def _check_options(priority_type: Any, backend: Any) -> None:
-    if priority_type not in PRIORITY_TYPES:
-        raise ValueError(f"priority_type must be one of {', '.join(PRIORITY_TYPES)}, not {priority_type!r}")
-    heap_class(backend)  # validates, and raises if "native" is unavailable
-
-
-def _numeric_heap(backend: Backend | None, reverse: bool, capacity: int = 0) -> Any:
-    return heap_class(backend)(reverse=reverse, capacity=capacity)
-
+PriorityFn = Callable[[K, V], float]
 
 class PQDict(MutableMapping[K, V], Generic[K, V]):
     """A mapping of keys to values that also behaves as a priority queue.
@@ -105,14 +32,9 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
     is given, otherwise the value itself. (Unlike ``pqdict``, the function
     receives the item's key as well as its value.)
 
-    Priorities may be numbers or any mutually comparable objects, such as
-    strings, tuples or dates. With the default ``priority_type="auto"``, a
-    queue runs on the fast native core while every priority is exactly
-    representable as a ``float``, and moves (once, in ``O(n)``) to the
-    pure-Python object core when one is not: a ``str``, a ``tuple``, an
-    ``int`` beyond 2**53, an inexact ``Decimal``. ``"float"`` pins the numeric
-    core (other priorities raise ``TypeError``); ``"object"`` pins the object
-    core. NaN is always rejected.
+    Priorities are numbers: anything ``float()`` accepts except ``str``
+    (``int``, ``float``, ``Decimal``, ``Fraction``, numpy scalars). They are
+    stored as ``float``, so integers are exact up to 2**53. NaN is rejected.
     By default the item with the smallest priority is on top; pass
     ``reverse=True`` for a max-queue. Ties are popped in unspecified order.
 
@@ -135,16 +57,10 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         key: Function ``(item_key, value) -> priority``. Defaults to using
             the value itself as the priority.
         reverse: If true, the largest priority is on top (max-queue).
-        priority_type: ``"auto"`` (default), ``"float"`` or ``"object"``.
-        backend: Implementation of the numeric core: ``"auto"`` (native if
-            available), ``"native"`` (raises ``ImportError`` if unavailable)
-            or ``"python"``. ``None`` (default) uses the process-wide default,
-            set with the ``IHEAP_BACKEND`` environment variable.
 
     Raises:
-        TypeError: A priority is not a number (``"float"``), or cannot be
-            compared with the others.
-        ValueError: A priority is NaN, or an option is unknown.
+        TypeError: A priority is not a number.
+        ValueError: A priority is NaN.
 
     Examples:
         >>> pq = PQDict({"a": 3, "b": 1}, reverse=True)
@@ -156,9 +72,6 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         >>> by_len = PQDict({"pear": 1, "fig": 9}, key=lambda k, v: len(k) + v)
         >>> by_len.top()
         'pear'
-        >>> words = PQDict({"x": "pear", "y": "apple"})  # strings: object core
-        >>> words.popitem(), words.core
-        (('y', 'apple'), 'object')
     """
 
     __slots__ = (
@@ -167,9 +80,6 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         "_keys",
         "_values",
         "_keyfn",
-        "_priority_type",
-        "_backend",
-        "_auto",
     )
 
     def __init__(
@@ -178,19 +88,8 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         *,
         key: PriorityFn[K, V] | None = None,
         reverse: bool = False,
-        priority_type: PriorityType = "auto",
-        backend: Backend | None = None,
     ) -> None:
-        _check_options(priority_type, backend)
-        reverse = bool(reverse)
-        self._priority_type = priority_type
-        self._backend = backend
-        if priority_type == "object":
-            self._heap: Any = ObjectHeap(reverse=reverse)
-        else:
-            self._heap = _numeric_heap(backend, reverse)
-        #: Still on the numeric core, but allowed to move to ObjectHeap.
-        self._auto = priority_type == "auto"
+        self._heap = IndexedHeap(reverse=bool(reverse))
         self._handles: dict[K, int] = {}
         self._keys: list[Any] = []
         self._values: list[Any] = []
@@ -206,8 +105,6 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         *,
         key: PriorityFn[K, V] | None = None,
         reverse: bool = False,
-        priority_type: PriorityType = "auto",
-        backend: Backend | None = None,
     ) -> PQDict[K, V]:
         """Create a queue with keys from ``iterable``, all set to ``value``.
 
@@ -216,16 +113,8 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
             value: Value (and, without ``key``, priority) shared by every key.
             key: Priority function, as in the constructor.
             reverse: Max-queue if true, as in the constructor.
-            priority_type: As in the constructor.
-            backend: As in the constructor.
         """
-        return cls(
-            ((k, value) for k in iterable),
-            key=key,
-            reverse=reverse,
-            priority_type=priority_type,
-            backend=backend,
-        )
+        return cls(((k, value) for k in iterable), key=key, reverse=reverse)
 
     @property
     def keyfn(self) -> PriorityFn[K, V] | None:
@@ -237,54 +126,10 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         """``True`` for a max-queue."""
         return self._heap.reverse
 
-    @property
-    def priority_type(self) -> PriorityType:
-        """The requested priority type: ``"auto"``, ``"float"`` or ``"object"``."""
-        return self._priority_type
-
-    @property
-    def backend(self) -> Backend | None:
-        """The requested backend (``None``: the process-wide default)."""
-        return self._backend
-
-    @property
-    def core(self) -> Literal["native", "python", "object"]:
-        """The core holding the priorities right now: ``"native"`` (Rust),
-        ``"python"`` (pure-Python numeric core) or ``"object"``
-        ([`ObjectHeap`][iheap.ObjectHeap])."""
-        if isinstance(self._heap, ObjectHeap):
-            return "object"
-        if NativeIndexedHeap is not None and isinstance(self._heap, NativeIndexedHeap):
-            return "native"
-        return "python"
-
     # -- internal helpers --------------------------------------------------
 
     def _priority(self, key: K, value: V) -> Any:
         return value if self._keyfn is None else self._keyfn(key, value)
-
-    def _admit(self, priorities: Iterable[Any]) -> None:
-        """In auto mode, move to the object core before using a priority the
-        numeric core cannot represent exactly."""
-        if self._auto and not _all_exact(priorities):
-            self._to_object_core()
-
-    def _to_object_core(self) -> None:
-        """Rebuild on ObjectHeap (``O(n)``), keeping items and their order.
-
-        Handles are compacted to ``0..n-1``; they are internal to ``PQDict``.
-        Everything is computed before anything is replaced, so if computing
-        a priority raises, the queue is unchanged.
-        """
-        keys = list(self._handles)
-        values = [self._values[h] for h in self._handles.values()]
-        priorities = values if self._keyfn is None else list(map(self._keyfn, keys, values))
-        heap = ObjectHeap(reverse=self._heap.reverse)
-        handles = heap.push_many(priorities)
-        self._heap = heap
-        self._auto = False
-        self._handles = dict(zip(keys, handles))
-        self._keys, self._values = keys, values
 
     def _bind(self, handle: int, key: K, value: V) -> None:
         keys = self._keys
@@ -347,13 +192,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
     def __ror__(self, other: Any) -> PQDict[K, V]:
         if not isinstance(other, Mapping):
             return NotImplemented
-        new = type(self)(
-            other,
-            key=self._keyfn,
-            reverse=self.reverse,
-            priority_type=self._priority_type,
-            backend=self._backend,
-        )
+        new = type(self)(other, key=self._keyfn, reverse=self.reverse)
         new.update(self)
         return new
 
@@ -367,16 +206,6 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
     def __setitem__(self, key: K, value: V) -> None:
         keyfn = self._keyfn
         priority = value if keyfn is None else keyfn(key, value)
-        if self._auto:
-            # Inline fast paths: floats, and ints below 2**53 in magnitude, are
-            # exact (anything else is decided by `_exact`).
-            t = type(priority)
-            if (
-                t is not float
-                and not (t is int and priority.bit_length() <= 53)
-                and not _exact(priority)
-            ):
-                self._to_object_core()
         handle = self._handles.get(key)
         if handle is None:
             handle = self._heap.push(priority)
@@ -416,7 +245,6 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         keys, values = list(items), list(items.values())
         keyfn = self._keyfn
         priorities = values if keyfn is None else list(map(keyfn, keys, values))
-        self._admit(priorities)
         # Checked only after all user code (the key function) has run.
         if not self._handles and not self._heap:
             self._load(keys, values, priorities)
@@ -480,34 +308,17 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         new._keys = self._keys.copy()
         new._values = self._values.copy()
         new._keyfn = self._keyfn
-        new._priority_type = self._priority_type
-        new._backend = self._backend
-        new._auto = self._auto
         return new
 
     __copy__ = copy
 
     def __reduce__(self) -> tuple[Any, ...]:
-        return (
-            _rebuild,
-            (
-                type(self),
-                list(self.items()),
-                self._keyfn,
-                self.reverse,
-                self._priority_type,
-                self._backend,
-            ),
-        )
+        return (_rebuild, (type(self), list(self.items()), self._keyfn, self.reverse))
 
     def __repr__(self) -> str:
         items = ", ".join(f"{k!r}: {v!r}" for k, v in self.items())
         extra = "" if self._keyfn is None else f", key={self._keyfn!r}"
         extra += ", reverse=True" if self.reverse else ""
-        if self._priority_type != "auto":
-            extra += f", priority_type={self._priority_type!r}"
-        if self._backend is not None:
-            extra += f", backend={self._backend!r}"
         return f"{type(self).__name__}({{{items}}}{extra})"
 
     # -- priority queue API ------------------------------------------------
@@ -631,9 +442,7 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         """
         if key in self._handles:
             raise KeyError(f"{key!r} is already in the queue")
-        priority = self._priority(key, value)
-        self._admit([priority])
-        popped = self._heap.push_pop(priority)
+        popped = self._heap.push_pop(self._priority(key, value))
         if popped is None:
             return key, value
         handle = popped[0]
@@ -656,11 +465,8 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
             raise KeyError(f"{new_key!r} is already in the queue")
         handle = self._handles[key]
         if self._keyfn is not None:
-            priority = self._keyfn(new_key, self._values[handle])
-            self._admit([priority])
-            handle = self._handles[key]  # the switch may have renumbered handles
             # Heap updates validate before mutating: atomic.
-            self._heap.update(handle, priority)
+            self._heap.update(handle, self._keyfn(new_key, self._values[handle]))
         del self._handles[key]
         self._handles[new_key] = handle
         self._keys[handle] = new_key
@@ -680,8 +486,6 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
             # updates validate before mutating: atomic.
             p1 = self._keyfn(key1, self._values[h2])
             p2 = self._keyfn(key2, self._values[h1])
-            self._admit([p1, p2])
-            h1, h2 = self._handles[key1], self._handles[key2]  # may be renumbered
             self._heap.update_many([h2, h1], [p1, p2])
         self._handles[key1], self._handles[key2] = h2, h1
         self._keys[h1], self._keys[h2] = key2, key1
@@ -716,16 +520,12 @@ class PQDict(MutableMapping[K, V], Generic[K, V]):
         """
         if key is not _MISSING:
             handle = self._handles[key]
-            priority = self._priority(key, self._values[handle])
-            self._admit([priority])
-            self._heap.update(self._handles[key], priority)
+            self._heap.update(handle, self._priority(key, self._values[handle]))
             return
         handles = list(self._handles.values())
-        priorities = [self._priority(self._keys[h], self._values[h]) for h in handles]
-        if self._auto and not _all_exact(priorities):
-            self._to_object_core()  # recomputes every priority itself
-            return
-        self._heap.update_many(handles, priorities)
+        self._heap.update_many(
+            handles, [self._priority(self._keys[h], self._values[h]) for h in handles]
+        )
 
 
 def _rebuild(
@@ -733,10 +533,9 @@ def _rebuild(
     items: list[tuple[Any, Any]],
     keyfn: PriorityFn[Any, Any] | None,
     reverse: bool,
-    priority_type: PriorityType = "auto",
-    backend: Backend | None = None,
+    *_legacy: Any,  # pickles from 0.3 carried priority_type and backend
 ) -> PQDict[Any, Any]:
-    return cls(items, key=keyfn, reverse=reverse, priority_type=priority_type, backend=backend)
+    return cls(items, key=keyfn, reverse=reverse)
 
 
 def minpq(*args: Any, **kwargs: Any) -> PQDict[Any, Any]:
@@ -759,70 +558,42 @@ def maxpq(*args: Any, **kwargs: Any) -> PQDict[Any, Any]:
     return PQDict(dict(*args, **kwargs), reverse=True)
 
 
-def _select(
-    n: int,
-    mapping: Mapping[K, V],
-    key: PriorityFn[K, V] | None,
-    reverse: bool,
-    priority_type: PriorityType,
-    backend: Backend | None,
-) -> list[K]:
-    _check_options(priority_type, backend)
+def _select(n: int, mapping: Mapping[K, V], key: PriorityFn[K, V] | None, reverse: bool) -> list[K]:
     keys = list(mapping)
     values = list(mapping.values())
     priorities = values if key is None else list(map(key, keys, values))
-    if priority_type == "object" or (priority_type == "auto" and not _all_exact(priorities)):
-        heap: Any = ObjectHeap(reverse=reverse)
-    else:
-        heap = _numeric_heap(backend, reverse, capacity=len(keys))
+    heap = IndexedHeap(reverse=reverse, capacity=len(keys))
     by_handle: list[Any] = [None] * len(keys)
     for k, handle in zip(keys, heap.push_many(priorities)):
         by_handle[handle] = k
     return [by_handle[handle] for handle, _ in heap.pop_many(n)]
 
 
-def nsmallest(
-    n: int,
-    mapping: Mapping[K, V],
-    key: PriorityFn[K, V] | None = None,
-    priority_type: PriorityType = "auto",
-    backend: Backend | None = None,
-) -> list[K]:
+def nsmallest(n: int, mapping: Mapping[K, V], key: PriorityFn[K, V] | None = None) -> list[K]:
     """Return the keys of the ``n`` items with the smallest priorities.
 
-    Runs in ``O(N + n log N)``: in native code for numeric priorities, in
-    pure Python on the object core otherwise.
+    Runs in ``O(N + n log N)`` in native code.
 
     Args:
         n: Number of keys to return.
         mapping: Any mapping of keys to values.
         key: Function ``(item_key, value) -> priority``. Defaults to the value.
-        priority_type: As in [`PQDict`][iheap.PQDict].
-        backend: As in [`PQDict`][iheap.PQDict].
 
     Returns:
         Up to ``n`` keys, smallest priority first.
     """
-    return _select(n, mapping, key, False, priority_type, backend)
+    return _select(n, mapping, key, False)
 
 
-def nlargest(
-    n: int,
-    mapping: Mapping[K, V],
-    key: PriorityFn[K, V] | None = None,
-    priority_type: PriorityType = "auto",
-    backend: Backend | None = None,
-) -> list[K]:
+def nlargest(n: int, mapping: Mapping[K, V], key: PriorityFn[K, V] | None = None) -> list[K]:
     """Return the keys of the ``n`` items with the largest priorities.
 
     Args:
         n: Number of keys to return.
         mapping: Any mapping of keys to values.
         key: Function ``(item_key, value) -> priority``. Defaults to the value.
-        priority_type: As in [`PQDict`][iheap.PQDict].
-        backend: As in [`PQDict`][iheap.PQDict].
 
     Returns:
         Up to ``n`` keys, largest priority first.
     """
-    return _select(n, mapping, key, True, priority_type, backend)
+    return _select(n, mapping, key, True)
