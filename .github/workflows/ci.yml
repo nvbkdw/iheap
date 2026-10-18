@@ -237,18 +237,24 @@ jobs:
           name: wheels-ft${{ matrix.python }}-${{ matrix.platform.os }}-${{ matrix.platform.target }}-${{ matrix.platform.manylinux || 'native' }}
           path: dist
 
-  # PyPy cannot load CPython's abi3 wheels: version-specific pp311 wheels.
+  # PyPy cannot load CPython's abi3 wheels: version-specific pp311 wheels for
+  # the current PyPy (from setup-python). On Linux the manylinux container
+  # carries an older PyPy (ABI pp73), so Linux also gets a container build for
+  # it; the current one is built on the host, with zig linking against glibc
+  # 2.17 to stay manylinux2014-compatible.
   wheels-pypy:
     needs: [rust, test]
     strategy:
       fail-fast: false
       matrix:
         platform:
-          - { os: ubuntu-latest, target: x86_64, manylinux: auto }
-          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: auto }
-          - { os: macos-15-intel, target: x86_64 }
-          - { os: macos-14, target: aarch64 }
-          - { os: windows-latest, target: x64 }
+          - { os: ubuntu-latest, target: x86_64, mode: host }
+          - { os: ubuntu-24.04-arm, target: aarch64, mode: host }
+          - { os: ubuntu-latest, target: x86_64, mode: container }
+          - { os: ubuntu-24.04-arm, target: aarch64, mode: container }
+          - { os: macos-15-intel, target: x86_64, mode: host }
+          - { os: macos-14, target: aarch64, mode: host }
+          - { os: windows-latest, target: x64, mode: host }
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 45
     steps:
@@ -258,23 +264,29 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: pypy3.11
-      - name: Select interpreter
+      - name: Select interpreter and build mode
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = Linux ]; then
-            echo "INTERPRETER=pypy3.11" >> "$GITHUB_ENV"   # in the manylinux container
+          if [ "${{ matrix.platform.mode }}" = container ]; then
+            echo "MANYLINUX=auto" >> "$GITHUB_ENV"
+            echo "BUILD_ARGS=--release --out dist -i pypy3.11" >> "$GITHUB_ENV"
+          elif [ "$RUNNER_OS" = Linux ]; then
+            python -m pip install "ziglang>=0.13"
+            echo "MANYLINUX=off" >> "$GITHUB_ENV"
+            echo "BUILD_ARGS=--release --out dist --zig --compatibility manylinux2014 -i ${{ steps.py.outputs.python-path }}" >> "$GITHUB_ENV"
           else
-            echo "INTERPRETER=${{ steps.py.outputs.python-path }}" >> "$GITHUB_ENV"
+            echo "MANYLINUX=" >> "$GITHUB_ENV"
+            echo "BUILD_ARGS=--release --out dist -i ${{ steps.py.outputs.python-path }}" >> "$GITHUB_ENV"
           fi
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           maturin-version: ${{ env.MATURIN_VERSION }}
           target: ${{ matrix.platform.target }}
-          manylinux: ${{ matrix.platform.manylinux }}
-          args: --release --out dist -i ${{ env.INTERPRETER }}
+          manylinux: ${{ env.MANYLINUX }}
+          args: ${{ env.BUILD_ARGS }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: wheels-pypy-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          name: wheels-pypy-${{ matrix.platform.os }}-${{ matrix.platform.target }}-${{ matrix.platform.mode }}
           path: dist
 
   sdist:
