@@ -269,13 +269,16 @@ jobs:
         run: |
           if [ "${{ matrix.platform.mode }}" = container ]; then
             echo "MANYLINUX=auto" >> "$GITHUB_ENV"
+            echo "CONTAINER=" >> "$GITHUB_ENV"
             echo "BUILD_ARGS=--release --out dist -i pypy3.11" >> "$GITHUB_ENV"
           elif [ "$RUNNER_OS" = Linux ]; then
             python -m pip install "ziglang>=0.13"
-            echo "MANYLINUX=off" >> "$GITHUB_ENV"
-            echo "BUILD_ARGS=--release --out dist --zig --compatibility manylinux2014 -i ${{ steps.py.outputs.python-path }}" >> "$GITHUB_ENV"
+            echo "MANYLINUX=2014" >> "$GITHUB_ENV"
+            echo "CONTAINER=off" >> "$GITHUB_ENV"   # host build; zig pins glibc 2.17
+            echo "BUILD_ARGS=--release --out dist --zig -i ${{ steps.py.outputs.python-path }}" >> "$GITHUB_ENV"
           else
             echo "MANYLINUX=" >> "$GITHUB_ENV"
+            echo "CONTAINER=" >> "$GITHUB_ENV"
             echo "BUILD_ARGS=--release --out dist -i ${{ steps.py.outputs.python-path }}" >> "$GITHUB_ENV"
           fi
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
@@ -283,6 +286,7 @@ jobs:
           maturin-version: ${{ env.MATURIN_VERSION }}
           target: ${{ matrix.platform.target }}
           manylinux: ${{ env.MANYLINUX }}
+          container: ${{ env.CONTAINER }}
           args: ${{ env.BUILD_ARGS }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
